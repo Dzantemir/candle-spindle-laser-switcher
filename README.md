@@ -4,6 +4,10 @@
 
 A compact plugin for **[Candle](https://github.com/Denvi/Candle)** that toggles between **Spindle (`$32=0`)** and **Laser (`$32=1`)** modes with a single button and automatically hides laser-specific controls when in Spindle mode.
 
+
+<img width="456" height="133" alt="123" src="https://github.com/user-attachments/assets/113fc03d-320e-4a36-a4a0-1095dbd408b1" />
+
+
 ---
 
 ## RU — Описание и возможности
