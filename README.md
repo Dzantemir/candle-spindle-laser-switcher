@@ -1,83 +1,122 @@
-# Candle Spindle / Laser Switcher Plugin (`spindle_laser`)
+# Spindle / Laser — tool switcher plugin for Candle
 
-Компактный плагин для **[Candle](https://github.com/Denvi/Candle)** (GRBL CNC Controller), позволяющий в один клик переключаться между режимами **Шпиндель (`$32=0`)** и **Лазер (`$32=1`)** с автоматическим скрытием лазерных кнопок при работе фрезой.
+A compact icon panel for Candle that switches tools **SPINDLE ($32=0) ↔ LASER
+($32=1)** — together with the speeds (the `$30`/`$31` S-parameter range).
 
-A compact plugin for **[Candle](https://github.com/Denvi/Candle)** that toggles between **Spindle (`$32=0`)** and **Laser (`$32=1`)** modes with a single button and automatically hides laser-specific controls when in Spindle mode.
+**One click = a complete tool change.** Values are taken from Candle's
+**"Machine info"** tab and sent to the controller as a single batch:
 
+```
+M5          stop the tool before switching the mode
+$32=1       enable laser mode
+$30=1000    laser max power   ┐ substituted from the
+$31=0       laser min power   ┘ "Machine info" tab
+```
 
-<img width="456" height="133" alt="123" src="https://github.com/user-attachments/assets/113fc03d-320e-4a36-a4a0-1095dbd408b1" />
+(when switching to the spindle — the same, but `$32=0` and the spindle speed
+min/max instead of the laser power).
 
+## Features
 
----
+- **Speeds switch together with the tool.** On every spindle↔laser switch the
+  plugin sends `M5`, `$32` and the `$30`/`$31` limits of the new tool in one
+  batch: spindle — min/max speed, laser — min/max power from "Machine info".
+- **Direct write, no preliminary read/compare.** A "read → compare → write
+  only what differs" cycle is unnecessary: grbl v1.1 itself does not rewrite
+  EEPROM values that are identical to the current ones, and a tool switch is
+  a rare manual action, not a stream of commands. One click — one batch, no
+  extra `$$` round-trips.
+- **Values are always fresh.** The limits are read from Candle's settings at
+  click time instead of being copied into plugin settings: editing
+  "Machine info" takes effect on the next switch.
+- **The "Speed" slider follows the tool.** The range of the speed slider in
+  Candle's main window switches to the active tool's limits, the current
+  position is rescaled proportionally (50% → 50%). UI-side only — nothing
+  extra is sent to the controller.
+- **No invented limits.** If a value is missing in "Machine info", only
+  `M5`+`$32` is sent to the controller.
+- **Synchronization with the real machine state.** The `$$` query that
+  Candle itself sends after every connect/reset/homing is recognized: the
+  mode and the controller's real `$30` (shown in the button tooltip) are
+  picked up from the answer. The last mode is remembered and restored on
+  startup. On disconnect the state resets — everything is re-read on the
+  next connection.
 
-## RU — Описание и возможности
+## Panel buttons
 
-### Особенности
-* **Одна кнопка-переключатель (Шпиндель ↔ Лазер):**
-  * В режиме **Шпиндель (`$32=0`)** отображает иконку фрезы, отправляет `M5`, `S0`, `$32=0` и (опционально) прописывает обороты `$30` / `$31` для шпинделя.
-  * В режиме **Лазер (`$32=1`)** меняет иконку на лазер, отправляет `M5`, `$32=1` и (опционально) прописывает максимальную/минимальную мощность `$30` / `$31` для лазера.
-* **Умное скрытие кнопок лазера:**
-  * Когда выбран режим **Шпиндель (`$32=0`)**, все кнопки управления лазером **скрыты**, чтобы не занимать место и исключить случайное включение луча во время фрезеровки.
-  * Как только активируется режим **Лазер (`$32=1`)**, в том же ряду справа появляются 3 кнопки управления лазером:
-    1. **Фокус (Focus)** — включает/выключает слабый тестовый луч для наведения и фокусировки (`G1 F1000 M3 S10` / `M5 S0`). Пока луч включён, кнопка подсвечивается жёлтым цветом.
-    2. **Импульс (Pulse)** — подаёт короткую тестовую вспышку заданной мощности и длительности (по умолчанию `S100` на `200 мс`) для постановки контрольной точки.
-    3. **Выкл (OFF)** — мгновенное отключение лазера (`M5 S0`).
-* **Компактный размер без прокрутки:**
-  * Панель выполнена в один ряд из 4 кнопок `48×48` (идентично штатным панелям «Система координат» и «Пользовательские команды»), не растягивает боковую панель Candle и не вызывает появление полос прокрутки.
-* **Автоопределение режима при подключении:**
-  * При соединении со станком плагин автоматически опрашивает `$$`, считывает текущее состояние `$32` из EEPROM контроллера Grbl и синхронизирует интерфейс.
-* **Гибкие настройки и горячие клавиши:**
-  * Собственная вкладка в **`Сервис → Настройки → Шпиндель / Лазер`** (`$30`/`$31` для шпинделя и лазера, мощность фокуса `S`, мощность и длительность импульса, автоопрос `$$`).
-  * Поддержка назначения горячих клавиш в **`Сервис → Настройки → Сочетания клавиш`**.
+| Button | What it does | Commands sent |
+|--------|--------------|---------------|
+| **Mode** (spindle/laser icon) | tool change | `M5` + `$32=x` + `$30=…` + `$31=…` |
+| **Focus** | focus beam ON/OFF — laser mode only | `M3 S…` / `M5` + `S0` |
+| **Pulse** | short laser test pulse — laser mode only | `M3 S…` + `G4 P…` + `M5` |
+| **Off** | turn the laser off | `M5` + `S0` |
 
-### Установка
-1. Скопируйте папку **`spindle_laser`** в директорию **`candleplugins`** вашей программы Candle:
-   ```text
-   Candle/
-   └── candleplugins/
-       ├── camera/
-       ├── coordinatesystem/
-       ├── emergencybutton/
-       ├── usercommands/
-       └── spindle_laser/        <-- сюда
-           ├── images/
-           ├── config.ini
-           ├── script.js
-           ├── settings.ui
-           ├── translation_ru.qm
-           ├── translation_ru.ts
-           └── widget.ui
-   ```
-2. Перезапустите **Candle**.
-3. Убедитесь, что панель включена в меню **«Окна» → «Панели» → «Шпиндель / Лазер»**.
+The Focus, Pulse and Off buttons are hidden automatically in spindle mode.
+The mode button tooltip shows the controller's real `$30` and the speed range
+of the active tool.
 
----
+## Plugin settings
 
-## EN — Features & Installation
+- **Focus power (S)** — beam power for the Focus button;
+- **Pulse S / duration (ms)** — test pulse parameters;
+- an explanation of how the tool change works.
 
-### Features
-* **Single Toggle Button (Spindle ↔ Laser):**
-  * **Spindle Mode (`$32=0`):** displays the endmill icon, sends `M5`, `S0`, `$32=0`, and optionally updates `$30`/`$31` to your spindle RPM range.
-  * **Laser Mode (`$32=1`):** switches the button icon to a laser head, sends `M5`, `$32=1`, and optionally updates `$30`/`$31` to your laser power range.
-* **Auto-Hiding Laser Controls:**
-  * In **Spindle mode (`$32=0`)**, laser command buttons are completely hidden (`visible = false`).
-  * In **Laser mode (`$32=1`)**, three laser buttons appear next to the mode toggle:
-    1. **Focus** — toggles a low-power focusing beam (`G1 F1000 M3 S10` / `M5 S0`) and highlights the button in amber while the beam is active.
-    2. **Pulse** — fires a short test pulse (`S100` for `200 ms` by default) to mark the origin on the workpiece.
-    3. **OFF** — immediately turns the laser off (`M5 S0`).
-* **Native Compact Layout:**
-  * Single-row 4-column `StyledToolButton` (`48×48`) layout that fits Candle's side dock with zero horizontal or vertical scrollbars.
-* **Auto-Sync with Grbl (`$$`):**
-  * Queries `$$` on connection and listens to `$32=` responses to always reflect the real state of the controller.
-* **Settings & Shortcuts:**
-  * Configurable in **`Service → Settings → Spindle / Laser`** and supports keyboard shortcuts in **`Service → Settings → Shortcuts`**.
+Speeds are not duplicated in the plugin settings — they are always taken
+from "Machine info".
 
-### Installation
-1. Copy the **`spindle_laser`** folder into the **`candleplugins`** directory of your Candle installation.
-2. Restart **Candle**.
-3. Enable the panel via **Windows → Panels → Spindle / Laser** (if not enabled automatically).
+## Installation
 
----
+1. Locate your Candle program folder (next to `candle.exe` / `candle`).
+2. Copy the whole `spindle_laser` folder into `candleplugins`
+   (create it if needed):
+
+```
+Candle/
+├── candle(.exe)
+└── candleplugins/
+    └── spindle_laser/
+        ├── config.ini
+        ├── script.js
+        ├── widget.ui
+        ├── settings.ui
+        ├── translation_ru.ts
+        ├── translation_ru.qm
+        └── images/            button icons
+```
+
+3. Restart Candle — a "Spindle / Laser" row appears in the right panel area.
+
+## Requirements
+
+- Candle with JS plugin support (the `candleplugins` folder);
+- **grbl v1.1+** — the `$32` "laser mode" parameter only exists since v1.1;
+- a filled "Machine info" tab: spindle speed min/max and laser power min/max —
+  this is where the plugin takes `$30`/`$31` from.
+
+## Version history
+
+- **v5 (current)** — speeds switch with the tool: on every switch `$30`/`$31`
+  are substituted from "Machine info" and written immediately — as a single
+  `M5 + $32 + $30 + $31` batch, without a read/compare cycle (grbl v1.1 does
+  not write identical values to EEPROM).
+- **v4** — speed switching via "read → compare → write what differs".
+- **v3** — UI-only speed switching (Candle's slider), no `$30`/`$31` writes
+  at all; the limits block removed from the settings page.
+- **v2** — `$30`/`$31` writes made opt-in (off by default), default values
+  taken from "Machine info".
+- **v1 (bug)** — on every switch the plugin wrote fixed `$30`/`$31`
+  (10000/0 and 1000/0) into EEPROM, ruining the machine's real limits.
+  If grbl was already corrupted by that version — restore `$30`/`$31`
+  manually from Candle's console.
+
+## Files
+
+- `script.js` — plugin logic;
+- `widget.ui` — the panel (4 buttons: Mode, Focus, Pulse, Off);
+- `settings.ui` — the settings page (focus, pulse, explanation);
+- `translation_ru.ts` / `translation_ru.qm` — Russian localization;
+- `config.ini` — plugin manifest.
 
 ## License
-GPL-3.0 (compatible with Candle and Grbl).
+
+GPL-3.0 (same as Candle). Files are saved in UTF-8.
