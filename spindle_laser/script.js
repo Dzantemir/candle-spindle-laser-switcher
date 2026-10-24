@@ -3,6 +3,19 @@
 // - Button 1 toggles between Spindle ($32=0) and Laser ($32=1).
 // - Buttons 2..4 (Focus, Pulse, Laser OFF) are hidden when in Spindle mode ($32=0).
 //
+// v6 (unified localization - the official Candle mechanism):
+//   - ALL strings go through ONE translation file translation_<lang>.qm
+//     which Candle installs before loading script.js:
+//       * static .ui strings are translated by QUiLoader itself with the
+//         context = <class> element of the .ui file;
+//       * runtime strings use qsTr() (empty translation context) - exactly
+//         like the official usercommands plugin;
+//       * the plugin title from config.ini is translated by Candle with the
+//         frmMain context.
+//   - no custom language detection (no isRussian/trText heuristics): without
+//     a matching .qm qsTr() returns the English source - so the UI is either
+//     fully English or fully Russian, never a mix.
+//
 // v5 (tool change with DIRECT speed switching):
 //   - A mode switch is a TOOL change: besides $32 it switches the machine
 //     speed/power limits $30/$31 to the values configured in Candle
@@ -28,6 +41,24 @@ script.importExtension("qt.gui");
 script.importExtension("qt.widgets");
 script.importExtension("qt.custom");
 script.importExtension("qt.uitools");
+
+// Candle installs translator functions (qsTr/qsTranslate/...) into the
+// engine via installTranslatorFunctions() before evaluating this script.
+// Older builds may lack them - fall back to the English source text.
+if (typeof qsTr !== "function") {
+    qsTr = function(sourceText) { return String(sourceText); };
+}
+
+// Substitute %1..%N placeholders inside a translated template
+// (QtScript strings have no .arg()).
+function trFill(template, values)
+{
+    var s = String(template);
+    for (var key in values) {
+        s = s.replace(key, String(values[key]));
+    }
+    return s;
+}
 
 // Vars
 var appPath = app.path;
@@ -61,16 +92,6 @@ var uiSettings;
 // Cached main window spindle slider (slbSpindle) and last applied limits
 var cachedSlider = null;
 var lastApplied = { laser: null, min: null, max: null };
-
-function isRussian()
-{
-    return (!app.settings || !app.settings.language || app.settings.language === "ru");
-}
-
-function trText(en, ru)
-{
-    return isRussian() ? ru : en;
-}
 
 // Read an integer from Candle's own settings object ("Machine info" tab:
 // spindleSpeedMin/Max, laserPowerMin/Max). app.settings is the frmSettings
@@ -254,21 +275,8 @@ function createSettingsWidget()
     if (f.open(QIODevice.ReadOnly)) {
         uiSettings = loader.load(f);
         f.close();
-
-        if (uiSettings && uiSettings.lblNote) {
-            uiSettings.lblNote.wordWrap = true;
-            uiSettings.lblNote.text = trText(
-                "Tool change: on every switch the plugin writes $32 together with the speed/power "
-                + "limits $30/$31 from Candle \"Machine info\" as ONE direct batch: M5, $32, $30, $31. "
-                + "No read-back: the values are applied right away, and editing \"Machine info\" "
-                + "takes effect on the next switch. The speed slider follows the active tool.",
-                "Смена инструмента: при каждом переключении плагин ОДНОЙ посылкой пишет $32 вместе с лимитами "
-                + "скорости/мощности $30/$31 из вкладки «Информация о станке» (мин/макс шпинделя, мин/макс "
-                + "лазера): M5, $32, $30, $31. Без предварительного чтения — значения подставляются сразу; "
-                + "правка «Информации о станке» действует со следующего переключения. Слайдер скоростей "
-                + "следует за активным инструментом."
-            );
-        }
+        // lblNote text lives in settings.ui and is translated by QUiLoader
+        // from translation_<lang>.qm (context pluginSpindleLaserSettings).
     }
     return uiSettings;
 }
@@ -306,21 +314,20 @@ function updateUiState()
     }
 
     // Real machine $30 (when known) + active tool speed range
-    var sTxt = (curSKnown ? ("$30=" + curSMax + ", ") : "")
-            + trText("speeds ", "скорости ") + lim.min + "-" + lim.max;
-
     if (isLaserMode) {
         uiPanel.cmdModeToggle.icon = iconLaser;
-        uiPanel.cmdModeToggle.toolTip = trText(
-            "Mode: LASER ($32=1, " + sTxt + ") — click to switch to SPINDLE",
-            "Режим: ЛАЗЕР ($32=1, " + sTxt + ") — нажмите для переключения на ШПИНДЕЛЬ"
-        );
+        uiPanel.cmdModeToggle.toolTip = curSKnown
+            ? trFill(qsTr("Mode: LASER ($32=1, $30=%1, speeds %2-%3) - click to switch to SPINDLE"),
+                     { "%1": curSMax, "%2": lim.min, "%3": lim.max })
+            : trFill(qsTr("Mode: LASER ($32=1, speeds %1-%2) - click to switch to SPINDLE"),
+                     { "%1": lim.min, "%2": lim.max });
     } else {
         uiPanel.cmdModeToggle.icon = iconSpindle;
-        uiPanel.cmdModeToggle.toolTip = trText(
-            "Mode: SPINDLE ($32=0, " + sTxt + ") — click to switch to LASER",
-            "Режим: ШПИНДЕЛЬ ($32=0, " + sTxt + ") — нажмите для переключения на ЛАЗЕР"
-        );
+        uiPanel.cmdModeToggle.toolTip = curSKnown
+            ? trFill(qsTr("Mode: SPINDLE ($32=0, $30=%1, speeds %2-%3) - click to switch to LASER"),
+                     { "%1": curSMax, "%2": lim.min, "%3": lim.max })
+            : trFill(qsTr("Mode: SPINDLE ($32=0, speeds %1-%2) - click to switch to LASER"),
+                     { "%1": lim.min, "%2": lim.max });
     }
 
     // 2. Hide or show laser buttons depending on whether Laser mode is active
@@ -332,18 +339,15 @@ function updateUiState()
     uiPanel.cmdFocus.blockSignals(false);
     uiPanel.cmdFocus.backgroundColor = focusActive ? new QColor(255, 170, 0) : new QColor(0, 0, 0, 0);
 
-    uiPanel.cmdFocus.toolTip = trText(
-        "Laser focus beam ON/OFF (M3 S" + fPwr + " / M5)",
-        "Луч фокусировки ВКЛ/ВЫКЛ (M3 S" + fPwr + " / M5)"
+    uiPanel.cmdFocus.toolTip = trFill(
+        qsTr("Laser focus beam ON/OFF (M3 S%1 / M5)"),
+        { "%1": fPwr }
     );
-    uiPanel.cmdPulse.toolTip = trText(
-        "Laser test pulse (S" + pPwr + ", " + pMs + " ms)",
-        "Тестовый импульс лазера (S" + pPwr + ", " + pMs + " мс)"
+    uiPanel.cmdPulse.toolTip = trFill(
+        qsTr("Laser test pulse (S%1, %2 ms)"),
+        { "%1": pPwr, "%2": pMs }
     );
-    uiPanel.cmdLaserOff.toolTip = trText(
-        "Turn laser OFF (M5 S0)",
-        "Выключить лазер (M5 S0)"
-    );
+    uiPanel.cmdLaserOff.toolTip = qsTr("Turn laser OFF (M5 S0)");
 }
 
 // ------------------------------------------------------------------
