@@ -29,7 +29,7 @@
    <item>
     <widget class="QLabel" name="lblNote">
      <property name="text">
-      <string>Tool change: on every switch the plugin writes $32 together with the speed/power limits $30/$31 from Candle &quot;Machine info&quot; as ONE direct batch: M5, $32, $30, $31. No read-back: the values are applied right away, and editing &quot;Machine info&quot; takes effect on the next switch. The speed slider follows the active tool.</string>
+      <string>After GRBL acknowledges $32, the plugin sends $30 and $31 from Candle &quot;Machine info&quot;. Both commands appear in the log even when a value is unchanged. The speed slider follows the active tool.</string>
      </property>
      <property name="wordWrap">
       <bool>true</bool>

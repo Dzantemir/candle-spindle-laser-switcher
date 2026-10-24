@@ -84,8 +84,8 @@
         <translation>Импульс S / Время (мс):</translation>
     </message>
     <message>
-        <source>Tool change: on every switch the plugin writes $32 together with the speed/power limits $30/$31 from Candle "Machine info" as ONE direct batch: M5, $32, $30, $31. No read-back: the values are applied right away, and editing "Machine info" takes effect on the next switch. The speed slider follows the active tool.</source>
-        <translation>Смена инструмента: при каждом переключении плагин ОДНОЙ посылкой пишет $32 вместе с лимитами скорости/мощности $30/$31 из вкладки «Информация о станке» (мин/макс шпинделя, мин/макс лазера): M5, $32, $30, $31. Без предварительного чтения — значения подставляются сразу; правка «Информации о станке» действует со следующего переключения. Слайдер скоростей следует за активным инструментом.</translation>
+        <source>After GRBL acknowledges $32, the plugin sends $30 and $31 from Candle "Machine info". Both commands appear in the log even when a value is unchanged. The speed slider follows the active tool.</source>
+        <translation>После подтверждения $32 плагин отправляет $30 и $31 из вкладки Candle «Информация о станке». Обе команды видны в журнале, даже если значение не меняется. Слайдер соответствует активному инструменту.</translation>
     </message>
 </context>
 </TS>

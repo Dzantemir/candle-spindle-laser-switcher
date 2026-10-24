@@ -3,29 +3,23 @@
 A compact icon panel for Candle that switches tools **SPINDLE ($32=0) ↔ LASER
 ($32=1)** — together with the speeds (the `$30`/`$31` S-parameter range).
 
-**One click = a complete tool change.** Values are taken from Candle's
-**"Machine info"** tab and sent to the controller as a single batch:
-
-```
-M5          stop the tool before switching the mode
-$32=1       enable laser mode
-$30=1000    laser max power   ┐ substituted from the
-$31=0       laser min power   ┘ "Machine info" tab
-```
-
-(when switching to the spindle — the same, but `$32=0` and the spindle speed
-min/max instead of the laser power).
+**One click = a tool change request.** The plugin reads the controller's
+actual `$30`/`$31`/`$32` values, sends `M5`, `S0`, `G0` and `$32=x`, then waits
+for GRBL to acknowledge `$32`. Both `$30` and `$31` limits from Candle's **"Machine info"** are sent after
+that acknowledgement whenever their target values are available, even when one
+value already matches the controller. Target limits are applied automatically;
+no QtScript-dependent confirmation dialog can silently block the switch. If GRBL rejects the mode command, the interface is refreshed
+from the controller's reported settings.
 
 ## Features
 
-- **Speeds switch together with the tool.** On every spindle↔laser switch the
-  plugin sends `M5`, `$32` and the `$30`/`$31` limits of the new tool in one
-  batch: spindle — min/max speed, laser — min/max power from "Machine info".
-- **Direct write, no preliminary read/compare.** A "read → compare → write
-  only what differs" cycle is unnecessary: grbl v1.1 itself does not rewrite
-  EEPROM values that are identical to the current ones, and a tool switch is
-  a rare manual action, not a stream of commands. One click — one batch, no
-  extra `$$` round-trips.
+- **Acknowledged mode switching.** The UI changes only after GRBL acknowledges
+  `$32`. The configured Machine-info `$30`/`$31` limits are applied after that
+  acknowledgement; a rejected command causes a fresh `$$` query.
+- **Complete range applied on every switch.** After GRBL acknowledges `$32`, the
+  plugin explicitly sends both `$30` and `$31` whenever their Machine-info target
+  values are available. This keeps the max/min pair explicit in the command log,
+  even if one target equals the current value.
 - **Values are always fresh.** The limits are read from Candle's settings at
   click time instead of being copied into plugin settings: editing
   "Machine info" takes effect on the next switch.
@@ -33,8 +27,8 @@ min/max instead of the laser power).
   Candle's main window switches to the active tool's limits, the current
   position is rescaled proportionally (50% → 50%). UI-side only — nothing
   extra is sent to the controller.
-- **No invented limits.** If a value is missing in "Machine info", only
-  `M5`+`$32` is sent to the controller.
+- **No invented limits.** If a value is missing in "Machine info", the plugin keeps that current controller
+  limit unchanged; it still sends `M5`, `S0` and `$32`.
 - **Synchronization with the real machine state.** The `$$` query that
   Candle itself sends after every connect/reset/homing is recognized: the
   mode and the controller's real `$30` (shown in the button tooltip) are
@@ -49,10 +43,10 @@ min/max instead of the laser power).
 
 | Button | What it does | Commands sent |
 |--------|--------------|---------------|
-| **Mode** (spindle/laser icon) | tool change | `M5` + `$32=x` + `$30=…` + `$31=…` |
-| **Focus** | focus beam ON/OFF — laser mode only | `M3 S…` / `M5` + `S0` |
-| **Pulse** | short laser test pulse — laser mode only | `M3 S…` + `G4 P…` + `M5` |
-| **Off** | turn the laser off | `M5` + `S0` |
+| **Mode** (spindle/laser icon) | tool change | `M5`, `S0`, `$32=x`; then `$30=…` and `$31=…` after `ok` |
+| **Focus** | focus beam ON/OFF — laser mode only | query `$G`, then `G1 F…` (no axis words) + `M3 S…`; off uses `M5`, `S0`, `G0 F…` |
+| **Pulse** | short laser test pulse — laser mode only | query `$G`, then `G1 F…` + `M3 S…` + `G4 P…` + `M5` + `S0` + restore `G0 F…` |
+| **Off** | turn the laser off | `M5` + `S0` + `G0` |
 
 The Focus, Pulse and Off buttons are hidden automatically in spindle mode.
 The mode button tooltip shows the controller's real `$30` and the speed range
@@ -116,7 +110,13 @@ Candle/
 
 ## Version history
 
-- **v6 (current)** — unified localization through the standard Candle
+- **v8 (current)** — explicitly sends both `$30` and `$31` on every successful
+  tool switch when the corresponding Machine-info values are available, including
+  when a target equals the controller value. This ensures `$31` is not silently
+  omitted from the switch log.
+- **v7** — fixes for GRBL laser focus/pulse after reset and limits test power to
+  the controller `$31`–`$30` range.
+- **v6** — unified localization through the standard Candle
   mechanism: one `translation_ru.qm` covers the panel, tooltips, settings
   page and runtime messages (`.ui` strings are translated by QUiLoader,
   runtime strings via `qsTr()`); no more custom language detection — the UI
@@ -134,6 +134,24 @@ Candle/
   (10000/0 and 1000/0) into EEPROM, ruining the machine's real limits.
   If grbl was already corrupted by that version — restore `$30`/`$31`
   manually from Candle's console.
+
+
+
+### Focus and pulse behavior in GRBL laser mode
+
+The Focus and Pulse commands enable constant power with `M3`, then select
+the `G1` modal state without axis coordinates. This is necessary because
+GRBL 1.1 laser mode suppresses the output in the default `G0` mode. The pulse
+sequence ends with `M5`, `S0` and `G0`. Focus/Pulse are disabled until the
+controller's actual `$30` maximum has been read; values are constrained by
+`$31`/`$30`. This behavior is intended for manual stationary focusing and
+should be tested at the lowest practical power with suitable eye protection.
+
+Tool switching waits for the `$32` acknowledgement before applying Candle
+Machine-info `$30`/`$31` limits. If `$32` is rejected, the plugin refreshes the
+reported settings instead of leaving the UI optimistically switched. Note that
+switching tools can intentionally change `$30`/`$31` to the configured target
+range.
 
 ## Files
 

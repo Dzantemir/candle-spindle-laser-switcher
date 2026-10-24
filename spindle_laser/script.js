@@ -23,18 +23,16 @@
 //     settings page from the user's screenshot. Values are taken from
 //     app.settings at switch time, so editing "Machine info" takes effect
 //     on the next switch.
-//   - Written DIRECTLY in one batch, no read/compare round-trip:
-//         M5  $32=x  $30=max  $31=min
-//     grbl applies $-commands itself (identical values simply stay in
-//     place), and a tool switch is a rare manual action - no need to read
-//     the current values back first.
-//   - If a "Machine info" value is unavailable the plugin writes only M5+$32
-//     - it never invents limit values for the machine.
+//   - On tool change the plugin stops the output, waits for GRBL to acknowledge
+//     $32, then applies configured $30/$31 limits. If the limits differ from
+//     the actual controller settings, the dialog shows old and target values.
+//   - The UI does not switch optimistically: a rejected $32 leaves the prior
+//     mode displayed and triggers a fresh $$ report.
+//   - If a "Machine info" value is unavailable the plugin never invents it.
 //   - The main window spindle slider (slbSpindle) switches its range to the
 //     active tool limits (UI-side, nothing extra is sent).
-//   - $$ answers are still parsed for the button tooltip (real $30) and to
-//     learn the current mode after connect: Candle itself sends $$ after
-//     every connect/reset/homing (frmmain.cpp).
+//   - $$ answers are parsed for the real $30/$31/$32 values. Candle sends $$
+//     after connect/reset/homing on supported builds (frmmain.cpp).
 
 script.importExtension("qt.core");
 script.importExtension("qt.gui");
@@ -71,13 +69,25 @@ var deviceState = -1;
 var senderState = -1;
 var isLaserMode = false; // false = Spindle ($32=0), true = Laser ($32=1)
 var focusActive = false;
+var focusRestoreFeed = null;
+var pendingLaserAction = null;
+var requestedModeToggleAfterRefresh = false;
 
 // Real $30/$31 values as currently stored in the controller's EEPROM
 // (parsed from $$ dumps and from the "ok" answers to our own $30/$31
 // writes - shown in the button tooltip)
 var curSMax = 0;
 var curSMin = 0;
+var curSMaxKnown = false;
+var curSMinKnown = false;
 var curSKnown = false;
+var curModeKnown = false;
+
+// A tool change is completed only after GRBL acknowledges $32. The speed/power
+// limits are then written in a second batch, so a rejected mode change cannot
+// still overwrite $30/$31.
+var pendingToolChange = null;
+var modeChangeTimer = null;
 
 var iconSpindle;
 var iconLaser;
@@ -223,6 +233,71 @@ function applyToolSpeeds(force)
     lastApplied.max = lim.max;
 }
 
+function updateLaserPowerControls()
+{
+    // $30/$31 belong to the currently active tool. Never clamp laser-test
+    // preferences to spindle limits, or to the old tool limits while a switch
+    // is still applying the target range.
+    if (!uiSettings || !isLaserMode || pendingToolChange || !curSMaxKnown || curSMax < 1) return;
+
+    var maxPower = Math.min(100000, curSMax);
+    var minPower = curSMinKnown ? Math.max(1, curSMin) : 1;
+    if (minPower > maxPower) minPower = maxPower;
+
+    var controls = [uiSettings.spnFocusPower, uiSettings.spnPulsePower];
+    for (var i = 0; i < controls.length; i++) {
+        var c = controls[i];
+        if (!c) continue;
+        var v = Number(c.value);
+        c.minimum = minPower;
+        c.maximum = maxPower;
+        if (v < minPower) c.value = minPower;
+        else if (v > maxPower) c.value = maxPower;
+    }
+}
+
+function laserPowerForTest(requested)
+{
+    if (!curSMaxKnown || curSMax < 1 ||
+        (curSMinKnown && curSMin > curSMax)) {
+        // Candle normally queries $$ on connect. Request a fresh report and
+        // refuse to fire the laser until the real controller limit is known.
+        try { app.device.sendCommands("$$"); } catch (e) {}
+        return null;
+    }
+
+    var minPower = curSMinKnown ? Math.max(1, curSMin) : 1;
+    var power = parseInt(requested, 10);
+    if (isNaN(power)) power = minPower;
+    if (power < minPower) power = minPower;
+    if (power > curSMax) power = curSMax;
+    return power;
+}
+
+function stopModeChangeTimer()
+{
+    if (modeChangeTimer) {
+        try { modeChangeTimer.stop(); } catch (e) {}
+    }
+}
+
+function armModeChangeTimer()
+{
+    stopModeChangeTimer();
+    if (!modeChangeTimer) {
+        modeChangeTimer = new QTimer();
+        modeChangeTimer.singleShot = true;
+        modeChangeTimer.timeout.connect(function () {
+            if (!pendingToolChange) return;
+            // Do not leave the UI locked if GRBL never acknowledged the command.
+            pendingToolChange = null;
+            try { app.device.sendCommands("$$"); } catch (e) {}
+            updateUiState();
+        });
+    }
+    modeChangeTimer.start(5000);
+}
+
 function init()
 {
     loader.setWorkingDirectory(new QDir(pluginPath));
@@ -275,8 +350,17 @@ function createSettingsWidget()
     if (f.open(QIODevice.ReadOnly)) {
         uiSettings = loader.load(f);
         f.close();
-        // lblNote text lives in settings.ui and is translated by QUiLoader
-        // from translation_<lang>.qm (context pluginSpindleLaserSettings).
+        // Set the runtime note explicitly so it remains accurate even when
+        // Candle loads an older compiled translation_ru.qm.
+        if (uiSettings.lblNote) {
+            var settingsTitle = String(uiSettings.windowTitle);
+            if (settingsTitle.indexOf("Шпиндель") >= 0) {
+                uiSettings.lblNote.text = "После подтверждения $32 плагин отправляет $30 и $31 из «Информации о станке». Обе команды видны в журнале даже тогда, когда значение не меняется. Слайдер соответствует активному инструменту.";
+            } else {
+                uiSettings.lblNote.text = "After GRBL acknowledges $32, the plugin sends $30 and $31 from Machine info. Both commands appear in the log even when a value is unchanged. The speed slider follows the active tool.";
+            }
+        }
+        updateLaserPowerControls();
     }
     return uiSettings;
 }
@@ -287,9 +371,12 @@ function setLaserButtonsVisible(vis)
     uiPanel.cmdFocus.visible = vis;
     uiPanel.cmdPulse.visible = vis;
     uiPanel.cmdLaserOff.visible = vis;
-    if (uiPanel.actLaserFocus) uiPanel.actLaserFocus.enabled = vis && (deviceState == 1) && (senderState == 4);
-    if (uiPanel.actLaserPulse) uiPanel.actLaserPulse.enabled = vis && (deviceState == 1) && (senderState == 4);
-    if (uiPanel.actLaserOff) uiPanel.actLaserOff.enabled = vis && (deviceState == 1) && (senderState == 4);
+    var ready = (deviceState == 1) && (senderState == 4) && !pendingToolChange && !pendingLaserAction;
+    var safePowerKnown = curSMaxKnown && curSMax > 0 &&
+        (!curSMinKnown || curSMin <= curSMax);
+    if (uiPanel.actLaserFocus) uiPanel.actLaserFocus.enabled = vis && ready && safePowerKnown;
+    if (uiPanel.actLaserPulse) uiPanel.actLaserPulse.enabled = vis && ready && safePowerKnown;
+    if (uiPanel.actLaserOff) uiPanel.actLaserOff.enabled = vis && ready;
 }
 
 function updateUiState()
@@ -310,7 +397,8 @@ function updateUiState()
     // stays enabled while disconnected and silently does nothing (official
     // usercommands plugin updates storedActions enabled state the same way).
     if (uiPanel.actToggleSpindleLaser) {
-        uiPanel.actToggleSpindleLaser.enabled = (deviceState == 1) && (senderState == 4);
+        uiPanel.actToggleSpindleLaser.enabled = (deviceState == 1) && (senderState == 4) &&
+            !pendingToolChange && !pendingLaserAction;
     }
 
     // Real machine $30 (when known) + active tool speed range
@@ -330,8 +418,16 @@ function updateUiState()
                      { "%1": lim.min, "%2": lim.max });
     }
 
-    // 2. Hide or show laser buttons depending on whether Laser mode is active
+    // 2. Hide or show laser buttons depending on whether Laser mode is active.
+    // Focus/Pulse remain disabled until the real GRBL $30 power limit is known.
     setLaserButtonsVisible(isLaserMode);
+    var machineReady = (deviceState == 1) && (senderState == 4);
+    uiPanel.cmdModeToggle.enabled = machineReady && !pendingToolChange && !pendingLaserAction;
+    var safePowerKnown = curSMaxKnown && curSMax > 0 &&
+        (!curSMinKnown || curSMin <= curSMax);
+    uiPanel.cmdFocus.enabled = machineReady && isLaserMode && safePowerKnown && !pendingToolChange && !pendingLaserAction;
+    uiPanel.cmdPulse.enabled = machineReady && isLaserMode && safePowerKnown && !pendingToolChange && !pendingLaserAction;
+    uiPanel.cmdLaserOff.enabled = machineReady && isLaserMode && !pendingToolChange && !pendingLaserAction;
 
     // 3. Update laser buttons state & tooltips
     uiPanel.cmdFocus.blockSignals(true);
@@ -360,70 +456,160 @@ function updateUiState()
 // the plugin must never write invented limits to the controller.
 function toolTargets(laser)
 {
+    // Use Candle's Machine-info values when exposed by this Candle build.
+    // If a min/max property is unavailable, preserve the already-read real
+    // controller value. This guarantees that a mode switch still sends an
+    // explicit $30 AND $31 rather than silently omitting $31 when it is equal
+    // to the current setting or the property is not exposed by the host.
+    var maxValue = candleInt(laser ? "laserPowerMax" : "spindleSpeedMax", null);
+    var minValue = candleInt(laser ? "laserPowerMin" : "spindleSpeedMin", null);
+    if (maxValue == null && curSMaxKnown) maxValue = curSMax;
+    if (minValue == null && curSMinKnown) minValue = curSMin;
     return {
-        max: candleInt(laser ? "laserPowerMax" : "spindleSpeedMax", null),
-        min: candleInt(laser ? "laserPowerMin" : "spindleSpeedMin", null),
+        max: maxValue,
+        min: minValue,
         mode: laser ? 1 : 0
     };
 }
 
-// One DIRECT batch: M5, $32, $30, $31 - the "Machine info" values for the
-// new tool. No preliminary read/compare: grbl applies $-commands itself
-// (identical values simply stay in place), and a tool switch is a rare
-// manual action, so an extra $$ round-trip is not needed.
-// M5 goes first (grbl refuses a $32 change while the tool is running).
+// Tool switching first stops the output and requests $32. Only after the
+// controller acknowledges $32 are the target Machine-info $30/$31 limits
+// written. Both limits are sent on every switch when available, even if one
+// equals the current setting, so the full range is explicit in the command log.
+// Do not depend on QMessageBox being exposed by a particular Candle QtScript build.
 function applyToolChange(targetLaserMode)
 {
-    focusActive = false;
-    isLaserMode = targetLaserMode; // UI switches immediately, machine follows
+    if (pendingToolChange) return;
 
     var t = toolTargets(targetLaserMode);
-    var cmds = ["M5", "$32=" + t.mode];
-    if (t.max != null) cmds.push("$30=" + t.max);
-    if (t.min != null) cmds.push("$31=" + t.min);
-    app.device.sendCommands(cmds.join("\n"));
+    // A safe comparison requires the actual controller settings. Candle sends
+    // $$ after connect; if they are not known yet, refresh and ask the user to
+    // retry instead of silently overwriting unknown $30/$31 values.
+    if (!curModeKnown || !curSMaxKnown || !curSMinKnown) {
+        // A freshly reset GRBL may not yet have reported its settings. Refresh
+        // them and resume the requested toggle once the real $32/$30/$31 are
+        // known; do not leave the button disabled forever waiting for $$.
+        requestedModeToggleAfterRefresh = true;
+        try { app.device.sendCommands("$$"); } catch (e) {
+            requestedModeToggleAfterRefresh = false;
+        }
+        updateUiState();
+        return;
+    }
 
-    applyToolSpeeds(false); // <- slider speeds follow the tool
+    // Machine-info limits are deliberately applied automatically on a tool
+    // change. Some Candle QtScript builds do not expose QMessageBox; using it
+    // here caused a silent return and made the mode toggle appear broken.
+    var restoreFeedForModeSwitch = focusRestoreFeed;
+    focusActive = false;
+    focusRestoreFeed = null;
+    pendingToolChange = {
+        targetLaserMode: targetLaserMode,
+        max: t.max,
+        min: t.min,
+        stage: "mode",
+        waitMax: false,
+        waitMin: false,
+        failed: false
+    };
+
+    // First stop the output and force the safe G0 modal state. If Focus had
+    // temporarily set F, restore that feed before switching tools. Do not
+    // update the UI or write new speed limits until $32 is acknowledged.
+    var stopCommands = "M5\nS0\nG0";
+    if (restoreFeedForModeSwitch !== null && !isNaN(restoreFeedForModeSwitch)) {
+        stopCommands += " F" + formatGcodeNumber(restoreFeedForModeSwitch);
+    }
+    stopCommands += "\n$32=" + t.mode;
+    app.device.sendCommands(stopCommands);
+    armModeChangeTimer();
     updateUiState();
 }
 
 function onModeToggleClicked()
 {
-    applyToolChange(!isLaserMode);
+    if (!pendingToolChange) applyToolChange(!isLaserMode);
 }
 
-function onFocusClicked()
+// The GRBL 1.1 laser-mode documentation permits G1 without axis words to
+// change the modal motion state without moving an axis, but a positive F is
+// required. Query $G first so the prior modal feed can be restored afterward.
+// With no previously set feed (F0), use F100 only for the stationary test and
+// restore F0 under G0 when finished.
+function formatGcodeNumber(value)
 {
-    if (!isLaserMode) return;
+    var n = Number(value);
+    if (isNaN(n) || !isFinite(n)) n = 0;
+    return String(Number(n.toFixed(3)));
+}
 
-    var fPwr = uiSettings ? uiSettings.spnFocusPower.value : 10;
-    if (!focusActive) {
-        focusActive = true;
-        app.device.sendCommands("M3 S" + fPwr);
-    } else {
-        focusActive = false;
-        app.device.sendCommands("M5\nS0");
+function requestLaserAction(kind, power, seconds)
+{
+    if (!isLaserMode || pendingToolChange || pendingLaserAction) return;
+    pendingLaserAction = { kind: kind, power: power, seconds: seconds, stage: "query" };
+    try {
+        app.device.sendCommands("$G");
+    } catch (e) {
+        pendingLaserAction = null;
+        updateUiState();
     }
     updateUiState();
 }
 
+function onFocusClicked()
+{
+    if (!isLaserMode || pendingToolChange || pendingLaserAction) return;
+
+    if (focusActive) {
+        focusActive = false;
+        var restoreFeed = (focusRestoreFeed === null) ? null : focusRestoreFeed;
+        focusRestoreFeed = null;
+        if (restoreFeed === null || isNaN(restoreFeed)) {
+            app.device.sendCommands("M5\nS0\nG0");
+        } else {
+            app.device.sendCommands("M5\nS0\nG0 F" + formatGcodeNumber(restoreFeed));
+        }
+        updateUiState();
+        return;
+    }
+
+    var requested = uiSettings ? uiSettings.spnFocusPower.value : 10;
+    var fPwr = laserPowerForTest(requested);
+    if (fPwr === null) {
+        updateUiState();
+        return;
+    }
+    requestLaserAction("focus-on", fPwr, 0);
+}
+
 function onPulseClicked()
 {
-    if (!isLaserMode) return;
+    if (!isLaserMode || pendingToolChange || pendingLaserAction) return;
 
-    var pPwr = uiSettings ? uiSettings.spnPulsePower.value : 100;
+    var requested = uiSettings ? uiSettings.spnPulsePower.value : 100;
+    var pPwr = laserPowerForTest(requested);
+    if (pPwr === null) {
+        updateUiState();
+        return;
+    }
     var pMs  = uiSettings ? uiSettings.spnPulseMs.value : 200;
     var pSec = (pMs / 1000.0).toFixed(3);
 
     focusActive = false;
-    app.device.sendCommands("M3 S" + pPwr + "\nG4 P" + pSec + "\nM5");
+    requestLaserAction("pulse", pPwr, pSec);
     updateUiState();
 }
 
 function onLaserOffClicked()
 {
     focusActive = false;
-    app.device.sendCommands("M5\nS0");
+    var restoreFeed = (focusRestoreFeed === null) ? null : focusRestoreFeed;
+    focusRestoreFeed = null;
+    if (restoreFeed === null || isNaN(restoreFeed)) {
+        app.device.sendCommands("M5\nS0\nG0");
+    } else {
+        app.device.sendCommands("M5\nS0\nG0 F" + formatGcodeNumber(restoreFeed));
+    }
     updateUiState();
 }
 
@@ -436,7 +622,15 @@ function onAppDeviceStateChanged(status)
 
     if (status == -1) {
         focusActive = false;
+        focusRestoreFeed = null;
+        pendingLaserAction = null;
+        requestedModeToggleAfterRefresh = false;
+        curSMaxKnown = false;
+        curSMinKnown = false;
         curSKnown = false;         // the machine may be different on the next connect
+        curModeKnown = false;
+        pendingToolChange = null;
+        stopModeChangeTimer();
     }
 
     deviceState = status;
@@ -457,16 +651,128 @@ function onAppResponseReceived(command, index, response)
 {
     if (!response) return;
 
-    var cmd = String(command || "");
+    var cmd = String(command || "").replace(/^\s+|\s+$/g, "");
     var resp = String(response);
+    var respLower = resp.toLowerCase();
     var updated = false;
+    var isOk = respLower.indexOf("ok") !== -1;
+    var isError = respLower.indexOf("error") !== -1 || respLower.indexOf("alarm") !== -1;
 
-    // Real $30/$31 as reported by the controller - from $$ dumps...
+    // A $G report is needed to preserve the user's previous modal feed rate.
+    // Do not fire if GRBL did not return a valid modal report.
+    if (pendingLaserAction && pendingLaserAction.stage == "query" && cmd == "$G") {
+        var modalMatch = resp.match(/\[GC:([^\]]+)\]/i);
+        var feedMatch = modalMatch ? modalMatch[1].match(/\bF(-?[0-9]+(?:\.[0-9]*)?)/i) : null;
+        if (isError || !feedMatch) {
+            pendingLaserAction = null;
+            updateUiState();
+            return;
+        }
+
+        var oldFeed = parseFloat(feedMatch[1]);
+        if (isNaN(oldFeed) || oldFeed < 0) {
+            pendingLaserAction = null;
+            updateUiState();
+            return;
+        }
+        var action = pendingLaserAction;
+        var testFeed = (oldFeed > 0) ? oldFeed : 100;
+        var restore = formatGcodeNumber(oldFeed);
+        var feedForTest = formatGcodeNumber(testFeed);
+        pendingLaserAction = null;
+
+        if (action.kind == "focus-on") {
+            focusRestoreFeed = oldFeed;
+            focusActive = true;
+            app.device.sendCommands("G1 F" + feedForTest + "\nM3 S" + action.power);
+        } else if (action.kind == "pulse") {
+            // Keep controls locked until the final G0/F restore is acknowledged.
+            pendingLaserAction = { kind: "pulse-running", stage: "running" };
+            app.device.sendCommands("G1 F" + feedForTest + "\nM3 S" + action.power +
+                "\nG4 P" + action.seconds + "\nM5\nS0\nG0 F" + restore);
+        }
+        updateUiState();
+        return;
+    }
+
+    if (pendingLaserAction && pendingLaserAction.stage == "running" &&
+        pendingLaserAction.kind == "pulse-running" && cmd.indexOf("G0 F") === 0) {
+        pendingLaserAction = null;
+        updateUiState();
+    }
+
+    if (cmd.indexOf("G1 F") === 0 && isError && focusActive) {
+        // Fail safe: if GRBL rejects the modal G1 command, cancel focus and
+        // make a best-effort explicit laser-off/safe-mode request.
+        var failedFocusFeed = focusRestoreFeed;
+        focusActive = false;
+        focusRestoreFeed = null;
+        if (failedFocusFeed !== null && !isNaN(failedFocusFeed)) {
+            app.device.sendCommands("M5\nS0\nG0 F" + formatGcodeNumber(failedFocusFeed));
+        } else {
+            app.device.sendCommands("M5\nS0\nG0");
+        }
+        updateUiState();
+    }
+
+    // Process the $32 acknowledgement before changing the visible mode. Only
+    // once GRBL accepts the mode do we apply the new Machine-info $30/$31.
+    if (pendingToolChange && pendingToolChange.stage == "mode" && cmd.indexOf("$32=") === 0) {
+        if (isOk) {
+            curModeKnown = true;
+            isLaserMode = pendingToolChange.targetLaserMode;
+            focusActive = false;
+            pendingToolChange.stage = "limits";
+            // Always send both settings on a successful mode switch when the
+            // corresponding Machine-info value is available. Do not skip $31
+            // just because its target currently equals the controller value:
+            // the user expects the complete $30/$31 range to be applied and
+            // visible in Candle's command log for every tool change.
+            pendingToolChange.waitMax = pendingToolChange.max != null;
+            pendingToolChange.waitMin = pendingToolChange.min != null;
+            pendingToolChange.failed = false;
+
+            var limitCommands = [];
+            if (pendingToolChange.waitMax) limitCommands.push("$30=" + pendingToolChange.max);
+            if (pendingToolChange.waitMin) limitCommands.push("$31=" + pendingToolChange.min);
+            if (limitCommands.length > 0) {
+                app.device.sendCommands(limitCommands.join("\n"));
+                armModeChangeTimer();
+            } else {
+                pendingToolChange = null;
+                stopModeChangeTimer();
+            }
+            updated = true;
+        } else if (isError) {
+            pendingToolChange = null;
+            stopModeChangeTimer();
+            // Refresh reported settings rather than assuming either state.
+            try { app.device.sendCommands("$$"); } catch (e) {}
+            updated = true;
+        }
+    } else if (pendingToolChange && pendingToolChange.stage == "limits" &&
+               (cmd.indexOf("$30=") === 0 || cmd.indexOf("$31=") === 0)) {
+        if (cmd.indexOf("$30=") === 0) pendingToolChange.waitMax = false;
+        if (cmd.indexOf("$31=") === 0) pendingToolChange.waitMin = false;
+        if (isError) pendingToolChange.failed = true;
+        if (!pendingToolChange.waitMax && !pendingToolChange.waitMin) {
+            var limitsFailed = pendingToolChange.failed;
+            pendingToolChange = null;
+            stopModeChangeTimer();
+            if (limitsFailed) {
+                try { app.device.sendCommands("$$"); } catch (e) {}
+            }
+            updated = true;
+        }
+    }
+
+    // Real $30/$31 as reported by GRBL (normally in the $$ response).
     if (resp.indexOf("$30=") !== -1) {
         var m30 = resp.match(/\$30=(\d+)/);
         if (m30) {
             curSMax = parseInt(m30[1], 10);
-            curSKnown = true;
+            curSMaxKnown = true;
+            curSKnown = curSMaxKnown && curSMinKnown;
             updated = true;
         }
     }
@@ -474,43 +780,53 @@ function onAppResponseReceived(command, index, response)
         var m31 = resp.match(/\$31=(\d+)/);
         if (m31) {
             curSMin = parseInt(m31[1], 10);
-            curSKnown = true;
+            curSMinKnown = true;
+            curSKnown = curSMaxKnown && curSMinKnown;
             updated = true;
         }
     }
     // ...and from our own successful $30/$31 writes
-    if (cmd.indexOf("$30=") === 0 && resp.indexOf("ok") !== -1) {
+    if (cmd.indexOf("$30=") === 0 && isOk) {
         curSMax = parseInt(cmd.substring(4), 10);
-        curSKnown = true;
+        curSMaxKnown = true;
+        curSKnown = curSMaxKnown && curSMinKnown;
         updated = true;
     }
-    if (cmd.indexOf("$31=") === 0 && resp.indexOf("ok") !== -1) {
+    if (cmd.indexOf("$31=") === 0 && isOk) {
         curSMin = parseInt(cmd.substring(4), 10);
-        curSKnown = true;
+        curSMinKnown = true;
+        curSKnown = curSMaxKnown && curSMinKnown;
         updated = true;
     }
 
-    // Machine $32 learned from $$ (Candle queries the controller itself
-    // after every connect/reset/homing) or acknowledged from our own $32
-    // write -> sync mode and tool speeds.
+    // Machine $32 learned from $$ or acknowledged from our own $32 write.
     if (resp.indexOf("$32=") !== -1) {
         var m32 = resp.match(/\$32=(\d+)/);
         if (m32) {
+            curModeKnown = true;
             isLaserMode = (parseInt(m32[1], 10) !== 0);
             if (!isLaserMode) focusActive = false;
             updated = true;
         }
-    } else if (cmd.indexOf("$32=") === 0 && resp.indexOf("ok") !== -1) {
+    } else if (cmd.indexOf("$32=") === 0 && isOk && !pendingToolChange) {
+        curModeKnown = true;
         isLaserMode = (cmd.indexOf("$32=1") === 0);
         if (!isLaserMode) focusActive = false;
         updated = true;
     }
 
-    if (cmd.indexOf("M5") !== -1 && resp.indexOf("ok") !== -1) {
+    if (cmd.indexOf("M5") !== -1 && isOk) {
         focusActive = false;
         updated = true;
     }
 
+    updateLaserPowerControls();
+    if (requestedModeToggleAfterRefresh && curModeKnown && curSMaxKnown &&
+        curSMinKnown && !pendingToolChange) {
+        requestedModeToggleAfterRefresh = false;
+        applyToolChange(!isLaserMode); // invert the freshly read controller mode
+        return;
+    }
     if (updated) {
         applyToolSpeeds(false);
         updateUiState();
@@ -558,6 +874,7 @@ function onAppSettingsLoaded()
     }
 
     isLaserMode = toBool(s.value("lastLaserMode", false), false);
+    updateLaserPowerControls();
 
     // Candle has just set the slider to the spindle range; switch the speeds
     // to the restored tool so the UI matches the mode right from startup.
@@ -611,4 +928,5 @@ function onAppSettingsDefault()
     uiSettings.spnFocusPower.value = 10;
     uiSettings.spnPulsePower.value = 100;
     uiSettings.spnPulseMs.value = 200;
+    updateLaserPowerControls();
 }
