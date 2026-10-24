@@ -168,6 +168,11 @@
     <string>Laser test pulse</string>
    </property>
   </action>
+  <action name="actLaserOff">
+   <property name="text">
+    <string>Laser OFF (M5 S0)</string>
+   </property>
+  </action>
  </widget>
  <customwidgets>
   <customwidget>
@@ -206,6 +211,16 @@
    <hints>
     <hint type="sourcelabel"><x>-1</x><y>-1</y></hint>
     <hint type="destinationlabel"><x>128</x><y>24</y></hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>actLaserOff</sender>
+   <signal>triggered(bool)</signal>
+   <receiver>cmdLaserOff</receiver>
+   <slot>click()</slot>
+   <hints>
+    <hint type="sourcelabel"><x>-1</x><y>-1</y></hint>
+    <hint type="destinationlabel"><x>180</x><y>24</y></hint>
    </hints>
   </connection>
  </connections>
