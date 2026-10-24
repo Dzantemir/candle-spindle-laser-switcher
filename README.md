@@ -6,6 +6,11 @@ A compact icon panel for Candle that switches tools **SPINDLE ($32=0) ↔ LASER
 **One click = a complete tool change.** Values are taken from Candle's
 **"Machine info"** tab and sent to the controller as a single batch:
 
+<img width="237" height="106" alt="{78D09F4F-39C0-4B51-8ED1-D253A2F906DD}" src="https://github.com/user-attachments/assets/615ae941-24fb-40c6-bec0-e30663521595" />
+<img width="238" height="95" alt="{BBEBFC11-9C50-4DDF-880F-8D9F0FF21E1D}" src="https://github.com/user-attachments/assets/6c283e4e-1e36-48a8-a0f7-033a47ddc26e" />
+
+
+
 ```
 M5          stop the tool before switching the mode
 $32=1       enable laser mode
