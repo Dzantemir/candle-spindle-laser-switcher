@@ -153,14 +153,18 @@ function getSpindleSlider()
 // Speed range of the ACTIVE tool, taken from Candle "Machine info"
 function getToolLimits()
 {
-    var mn, mx;
-    if (isLaserMode) {
-        mn = candleInt("laserPowerMin", 0);
-        mx = candleInt("laserPowerMax", 1000);
-    } else {
-        mn = candleInt("spindleSpeedMin", 0);
-        mx = candleInt("spindleSpeedMax", 10000);
-    }
+    var minProp = isLaserMode ? "laserPowerMin" : "spindleSpeedMin";
+    var maxProp = isLaserMode ? "laserPowerMax" : "spindleSpeedMax";
+    var mn = candleInt(minProp, null);
+    var mx = candleInt(maxProp, null);
+
+    // If Candle does not expose Machine-info values, use the actual GRBL
+    // range already read from the controller instead of assuming defaults.
+    if (mn === null && curSMinKnown) mn = curSMin;
+    if (mx === null && curSMaxKnown) mx = curSMax;
+    if (mn === null) mn = 0;
+    if (mx === null) mx = isLaserMode ? 1000 : 10000;
+
     if (!(mx > mn)) mx = mn + 1;
     return { min: mn, max: mx };
 }
@@ -220,11 +224,11 @@ function applyToolSpeeds(force)
     if (newVal > lim.max) newVal = lim.max;
 
     try {
+        // Update the scale before changing the slider's limits and value.
+        slider.ratio = Math.pow(10, Math.max(0, floorLog10(lim.max) - 2));
         slider.minimum = lim.min;
         slider.maximum = lim.max;
         slider.value = newVal;
-        // Same step scaling Candle itself applies in applySettings()
-        slider.ratio = Math.pow(10, Math.max(0, floorLog10(lim.max) - 2));
     } catch (e) {
     }
 
@@ -621,6 +625,10 @@ function onAppDeviceStateChanged(status)
     }
 
     if (status == -1) {
+        // Candle may recreate the main-window slider after reconnect.
+        // Forget both the cached widget and the previously applied range.
+        cachedSlider = null;
+        lastApplied = { laser: null, min: null, max: null };
         focusActive = false;
         focusRestoreFeed = null;
         pendingLaserAction = null;
