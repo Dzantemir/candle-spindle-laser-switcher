@@ -30,6 +30,34 @@
         <source>Turn laser OFF (M5 S0)</source>
         <translation>Выключить лазер (M5 S0)</translation>
     </message>
+    <message>
+        <source>Mode: LASER ($32=1) - click to switch to SPINDLE</source>
+        <translation>Режим: ЛАЗЕР ($32=1) — нажмите для переключения на ШПИНДЕЛЬ</translation>
+    </message>
+    <message>
+        <source>Mode: SPINDLE ($32=0) - click to switch to LASER</source>
+        <translation>Режим: ШПИНДЕЛЬ ($32=0) — нажмите для переключения на ЛАЗЕР</translation>
+    </message>
+    <message>
+        <source>Tool change cancelled: invalid speed range in Machine info (min %1, max %2). Nothing was sent to the controller.</source>
+        <translation>Смена инструмента отменена: недопустимый диапазон скоростей в «Информации о станке» (мин. %1, макс. %2). На контроллер ничего не отправлено.</translation>
+    </message>
+    <message>
+        <source>Tool change will write $30: %1 -&gt; %2, $31: %3 -&gt; %4. Click the mode button again within 15 seconds to confirm.</source>
+        <translation>Смена инструмента запишет $30: %1 -&gt; %2, $31: %3 -&gt; %4. Нажмите кнопку режима ещё раз в течение 15 секунд для подтверждения.</translation>
+    </message>
+    <message>
+        <source>Tool mode changed, but applying $30/$31 failed. Check $30/$31 in the controller before using the machine.</source>
+        <translation>Режим инструмента изменён, но применить $30/$31 не удалось. Проверьте $30/$31 в контроллере перед работой на станке.</translation>
+    </message>
+    <message>
+        <source>Laser focus beam was turned OFF automatically after 5 minutes.</source>
+        <translation>Луч фокусировки автоматически выключен через 5 минут.</translation>
+    </message>
+    <message>
+        <source>Spindle / Laser</source>
+        <translation>Шпиндель / Лазер</translation>
+    </message>
 </context>
 <context>
     <name>frmMain</name>

@@ -5,10 +5,17 @@ A compact icon panel for Candle that switches tools **SPINDLE ($32=0) ↔ LASER
 
 **One click = a tool change request.** The plugin reads the controller's
 actual `$30`/`$31`/`$32` values, sends `M5`, `S0`, `G0` and `$32=x`, then waits
-for GRBL to acknowledge `$32`. Both `$30` and `$31` limits from Candle's **"Machine info"** are sent after
-that acknowledgement whenever their target values are available, even when one
-value already matches the controller. Target limits are applied automatically;
-no QtScript-dependent confirmation dialog can silently block the switch. If GRBL rejects the mode command, the interface is refreshed
+for GRBL to acknowledge `$32`. Both `$30` and `$31` limits from Candle's **"Machine info"** are then written
+one at a time (each acknowledged by GRBL, in the order that keeps the
+interim range valid), even when one value already matches the controller.
+The first time a target range would overwrite **different** values in the
+controller, the switch asks for a confirmation click instead: the mode
+button tooltip shows the old → new `$30`/`$31` values, nothing is sent yet,
+and clicking Mode again within 15 seconds confirms (the range is then
+remembered, so later switches stay one-click). This prevents a fresh
+Candle installation's factory-default "Machine info" values (spindle
+0/10000, laser 0/100) from silently replacing the machine's real limits.
+If GRBL rejects the mode command, the interface is refreshed
 from the controller's reported settings.
 
 ## Features
@@ -17,9 +24,12 @@ from the controller's reported settings.
   `$32`. The configured Machine-info `$30`/`$31` limits are applied after that
   acknowledgement; a rejected command causes a fresh `$$` query.
 - **Complete range applied on every switch.** After GRBL acknowledges `$32`, the
-  plugin explicitly sends both `$30` and `$31` whenever their Machine-info target
-  values are available. This keeps the max/min pair explicit in the command log,
-  even if one target equals the current value.
+  plugin explicitly writes both `$30` and `$31` whenever their Machine-info target
+  values are available — one at a time and in the order that keeps the interim
+  EEPROM range valid (`$31` first when the current minimum is not below the new
+  maximum). This keeps the max/min pair explicit in the command log, even if one
+  target equals the current value, and a failed write aborts the pair with a
+  warning instead of leaving a mixed range behind.
 - **Values are always fresh.** The limits are read from Candle's settings at
   click time instead of being copied into plugin settings: editing
   "Machine info" takes effect on the next switch.
@@ -27,8 +37,13 @@ from the controller's reported settings.
   Candle's main window switches to the active tool's limits, the current
   position is rescaled proportionally (50% → 50%). UI-side only — nothing
   extra is sent to the controller.
-- **No invented limits.** If a value is missing in "Machine info", the plugin keeps that current controller
-  limit unchanged; it still sends `M5`, `S0` and `$32`.
+- **No invented limits, no silent overwrites.** If a value is missing in
+  "Machine info", the plugin keeps that current controller limit unchanged.
+  An invalid target range (`max ≤ 0` or `min ≥ max`) refuses the tool change
+  entirely — nothing is sent and the reason is shown to the user. And the
+  first time a target range differs from what the controller currently has,
+  the switch requires a confirmation click showing the old → new values
+  (acknowledged ranges are remembered).
 - **Synchronization with the real machine state.** The `$$` query that
   Candle itself sends after every connect/reset/homing is recognized: the
   mode and the controller's real `$30` (shown in the button tooltip) are
@@ -43,10 +58,10 @@ from the controller's reported settings.
 
 | Button | What it does | Commands sent |
 |--------|--------------|---------------|
-| **Mode** (spindle/laser icon) | tool change | `M5`, `S0`, `$32=x`; then `$30=…` and `$31=…` after `ok` |
-| **Focus** | focus beam ON/OFF — laser mode only | query `$G`, then `G1 F…` (no axis words) + `M3 S…`; off uses `M5`, `S0`, `G0 F…` |
+| **Mode** (spindle/laser icon) | tool change | `M5`, `S0`, `G0`, `$32=x`; after `ok` `$30=…`/`$31=…` sequentially (first use of a new range: confirmation click) |
+| **Focus** | focus beam ON/OFF — laser mode only, auto-OFF after 5 minutes | query `$G`, then `G1 F…` (no axis words) + `M3 S…`; off uses `M5`, `S0`, `G0 F…` |
 | **Pulse** | short laser test pulse — laser mode only | query `$G`, then `G1 F…` + `M3 S…` + `G4 P…` + `M5` + `S0` + restore `G0 F…` |
-| **Off** | turn the laser off | `M5` + `S0` + `G0` |
+| **Off** | turn the laser off, cancel pending laser actions | `M5` + `S0` + `G0` |
 
 The Focus, Pulse and Off buttons are hidden automatically in spindle mode.
 The mode button tooltip shows the controller's real `$30` and the speed range
@@ -96,6 +111,7 @@ Candle/
         ├── settings.ui
         ├── translation_ru.ts
         ├── translation_ru.qm
+        ├── LICENSE
         └── images/            button icons
 ```
 
@@ -103,14 +119,40 @@ Candle/
 
 ## Requirements
 
-- Candle with JS plugin support (the `candleplugins` folder);
+- a current Candle build with JS plugin support (the `candleplugins`
+  folder, "Machine info" laser fields and the plugin storage API;
+  developed against the current Denvi/Candle sources);
 - **grbl v1.1+** — the `$32` "laser mode" parameter only exists since v1.1;
 - a filled "Machine info" tab: spindle speed min/max and laser power min/max —
   this is where the plugin takes `$30`/`$31` from.
 
 ## Version history
 
-- **v8 (current)** — explicitly sends both `$30` and `$31` on every successful
+- **v10 (current)** — second audit fixes: `$30`/`$31` are written sequentially
+  (acknowledged one at a time) in the order that keeps the interim EEPROM
+  range valid; overwriting different controller limits needs a confirmation
+  click the first time (factory-default "Machine info" values can no longer
+  silently replace the machine's real limits); laser actions are re-validated
+  at fire time and are cancelled by tool changes and by the always-enabled
+  OFF button; expected command strings are matched exactly (response index
+  -100 is shared by all plugins); a late `$32` acknowledgement still
+  completes the limits; Focus/Pulse user values are no longer rewritten to
+  the controller range (clamping happens at fire time only); the speed
+  slider no longer collapses after accepting Candle settings in laser mode;
+  the modal message box is removed; focus auto-OFF after 5 minutes;
+  Alarm/Sleep clear the focus state; assorted interlock, timeout and
+  documentation fixes.
+- **v9** — audit fixes: a tool change is refused (nothing is sent)
+  when the Machine-info range is invalid (`max ≤ 0` or `min ≥ max` — in GRBL
+  such a range makes any S>0 output full power); the deferred
+  toggle-after-`$$` request expires after 5 s and is cancelled by an external
+  `$32` change; Focus lights up only after GRBL acknowledges `M3`, and pending
+  laser actions have a 5 s timeout; state-machine answers are matched only for
+  the plugin's own commands; no invented slider limits when no trustworthy
+  range is known; `translation_ru.qm` recompiled from `translation_ru.ts`
+  (the hard-coded settings-note override is removed); root README
+  synchronized, LICENSE file added, unused `refresh.png` removed.
+- **v8** — explicitly sends both `$30` and `$31` on every successful
   tool switch when the corresponding Machine-info values are available, including
   when a target equals the controller value. This ensures `$31` is not silently
   omitted from the switch log.
@@ -139,13 +181,17 @@ Candle/
 
 ### Focus and pulse behavior in GRBL laser mode
 
-The Focus and Pulse commands enable constant power with `M3`, then select
-the `G1` modal state without axis coordinates. This is necessary because
-GRBL 1.1 laser mode suppresses the output in the default `G0` mode. The pulse
-sequence ends with `M5`, `S0` and `G0`. Focus/Pulse are disabled until the
-controller's actual `$30` maximum has been read; values are constrained by
-`$31`/`$30`. This behavior is intended for manual stationary focusing and
-should be tested at the lowest practical power with suitable eye protection.
+The Focus and Pulse commands first query `$G` to learn the current modal
+feed `F`, then select the `G1` modal state without axis coordinates
+(`G1 F…`) and only then enable constant power with `M3`. This is necessary
+because GRBL 1.1 laser mode suppresses the output in the default `G0` mode.
+The pulse sequence ends with `M5`, `S0` and `G0` restoring the previous feed;
+the focus beam turns itself OFF after 5 minutes. Focus/Pulse are disabled
+until the controller's actual `$30` maximum has been read; the power that is
+actually sent is clamped to `$31`/`$30` at fire time (and is still subject
+to GRBL's spindle-speed override, if one is set in Candle). This behavior
+is intended for manual stationary focusing and should be tested at the
+lowest practical power with suitable eye protection.
 
 Tool switching waits for the `$32` acknowledgement before applying Candle
 Machine-info `$30`/`$31` limits. If `$32` is rejected, the plugin refreshes the
@@ -164,4 +210,5 @@ range.
 
 ## License
 
-GPL-3.0 (same as Candle). Files are saved in UTF-8.
+GPL-3.0 (same as Candle) — see the `LICENSE` file in the repository root.
+Files are saved in UTF-8.
