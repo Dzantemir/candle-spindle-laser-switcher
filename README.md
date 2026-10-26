@@ -3,6 +3,10 @@
 A compact icon panel for Candle that switches tools **SPINDLE ($32=0) ↔ LASER
 ($32=1)** — together with the speeds (the `$30`/`$31` S-parameter range).
 
+<img width="237" height="106" alt="{78D09F4F-39C0-4B51-8ED1-D253A2F906DD}" src="https://github.com/user-attachments/assets/615ae941-24fb-40c6-bec0-e30663521595" />
+<img width="238" height="95" alt="{BBEBFC11-9C50-4DDF-880F-8D9F0FF21E1D}" src="https://github.com/user-attachments/assets/6c283e4e-1e36-48a8-a0f7-033a47ddc26e" />
+
+
 **One click = a tool change request.** The plugin reads the controller's
 actual `$30`/`$31`/`$32` values, sends `M5`, `S0`, `G0` and `$32=x`, then waits
 for GRBL to acknowledge `$32`. Both `$30` and `$31` limits from Candle's **"Machine info"** are then written
