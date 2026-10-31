@@ -12,11 +12,12 @@ actual `$30`/`$31`/`$32` values, sends `M5`, `S0`, `G0` and `$32=x`, then waits
 for GRBL to acknowledge `$32`. Both `$30` and `$31` limits from Candle's **"Machine info"** are then written
 one at a time (each acknowledged by GRBL, in the order that keeps the
 interim range valid), even when one value already matches the controller.
-The first time a target range would overwrite **different** values in the
-controller, the switch asks for a confirmation click instead: the mode
-button tooltip shows the old → new `$30`/`$31` values, nothing is sent yet,
-and clicking Mode again within 15 seconds confirms (the range is then
-remembered, so later switches stay one-click). This prevents a fresh
+A switch that would overwrite **different** values in the controller asks
+for a confirmation click instead: the mode button tooltip shows the old →
+new `$30`/`$31` values, nothing is sent yet, and clicking Mode again within
+15 seconds confirms (that exact transition — current range → target range —
+is then remembered, so repeating it stays one-click, while a `$30`/`$31`
+you changed manually in the meantime asks again). This prevents a fresh
 Candle installation's factory-default "Machine info" values (spindle
 0/10000, laser 0/100) from silently replacing the machine's real limits.
 If GRBL rejects the mode command, the interface is refreshed
@@ -44,10 +45,19 @@ from the controller's reported settings.
 - **No invented limits, no silent overwrites.** If a value is missing in
   "Machine info", the plugin keeps that current controller limit unchanged.
   An invalid target range (`max ≤ 0` or `min ≥ max`) refuses the tool change
-  entirely — nothing is sent and the reason is shown to the user. And the
-  first time a target range differs from what the controller currently has,
-  the switch requires a confirmation click showing the old → new values
-  (acknowledged ranges are remembered).
+  entirely — nothing is sent and the reason is shown to the user. And a
+  switch that would replace different controller limits requires a
+  confirmation click showing the old → new values; the confirmation is
+  remembered per transition (current range → target range), so limits you
+  changed manually afterwards are never overwritten silently.
+- **Focus beam interlocks.** The plugin never injects `M5`/`S0`/`G0` into a
+  running job: the 5-minute auto-OFF (and every other OFF) is sent only when
+  the machine is Idle, otherwise it waits for Idle. Starting a program with the
+  focus beam on switches the beam off first. GRBL jogs inherit the modal laser
+  state, so a jog with the beam on would burn a line along its path: by
+  default a jog start cancels the jog (realtime jog cancel) and turns the
+  beam off at Idle (see "Turn focus beam OFF when a jog starts" in the
+  settings). The **Off** button also works during a jog.
 - **Synchronization with the real machine state.** The `$$` query that
   Candle itself sends after every connect/reset/homing is recognized: the
   mode and the controller's real `$30` (shown in the button tooltip) are
@@ -62,19 +72,24 @@ from the controller's reported settings.
 
 | Button | What it does | Commands sent |
 |--------|--------------|---------------|
-| **Mode** (spindle/laser icon) | tool change | `M5`, `S0`, `G0`, `$32=x`; after `ok` `$30=…`/`$31=…` sequentially (first use of a new range: confirmation click) |
+| **Mode** (spindle/laser icon) | tool change | `M5`, `S0`, `G0`, `$32=x`; after `ok` `$30=…`/`$31=…` sequentially (when different controller limits would be overwritten: confirmation click) |
 | **Focus** | focus beam ON/OFF — laser mode only, auto-OFF after 5 minutes | query `$G`, then `G1 F…` (no axis words) + `M3 S…`; off uses `M5`, `S0`, `G0 F…` |
 | **Pulse** | short laser test pulse — laser mode only | query `$G`, then `G1 F…` + `M3 S…` + `G4 P…` + `M5` + `S0` + restore `G0 F…` |
-| **Off** | turn the laser off, cancel pending laser actions | `M5` + `S0` + `G0` |
+| **Off** | turn the laser off, cancel pending laser actions — works in Idle and during a jog | `M5` + `S0` + `G0` (during a jog: realtime jog cancel first, the OFF follows at Idle) |
 
 The Focus, Pulse and Off buttons are hidden automatically in spindle mode.
+Mode, Focus and Pulse are available only when the machine is Idle; Off is
+available in Idle and during a jog.
 The mode button tooltip shows the controller's real `$30` and the speed range
 of the active tool.
 
 ## Plugin settings
 
-- **Focus power (S)** — beam power for the Focus button;
-- **Pulse S / duration (ms)** — test pulse parameters;
+- **Focus power (S)** — beam power for the Focus button (default 10);
+- **Pulse S / duration (ms)** — test pulse parameters (default S 10, 200 ms;
+  mind your laser range: on the factory range 0..100, S 100 is full power);
+- **Turn focus beam OFF when a jog starts** — on by default. Uncheck it only
+  if you deliberately jog (for example Z focusing) with the beam on;
 - an explanation of how the tool change works.
 
 Speeds are not duplicated in the plugin settings — they are always taken
@@ -132,7 +147,20 @@ Candle/
 
 ## Version history
 
-- **v10 (current)** — second audit fixes: `$30`/`$31` are written sequentially
+- **v11 (current)** — third audit fixes: the focus auto-OFF no longer injects
+  `M5`/`S0`/`G0` into a running job — it waits for Idle; starting a program
+  with the focus beam on sends the OFF first; a jog started with the focus
+  beam on is cancelled and the beam is switched off (new setting, on by
+  default); the Off button works during a jog and the panel is no longer
+  disabled as a whole outside Idle; default Pulse S is 10 instead of 100
+  (a stored 100 is migrated once); a click before the first `$$` answer can
+  no longer invert the controller's real mode (the clicked target mode is
+  remembered, and nothing is changed when the controller is already in it);
+  the overwrite confirmation is keyed by the whole transition, so a manually
+  changed `$30`/`$31` is never overwritten silently (confirmations are asked
+  once again after the update); unchanged values are shown as "(unchanged)"
+  instead of "0 -> 0"; an unused translation entry removed.
+- **v10** — second audit fixes: `$30`/`$31` are written sequentially
   (acknowledged one at a time) in the order that keeps the interim EEPROM
   range valid; overwriting different controller limits needs a confirmation
   click the first time (factory-default "Machine info" values can no longer
@@ -197,6 +225,17 @@ to GRBL's spindle-speed override, if one is set in Candle). This behavior
 is intended for manual stationary focusing and should be tested at the
 lowest practical power with suitable eye protection.
 
+Interlocks (v11): an OFF is only ever sent when the machine is Idle with the
+sender stopped; in any other state it is remembered and sent as soon as the
+machine returns to Idle (Alarm, Sleep and disconnect drop it, because GRBL has
+already stopped the output). The Candle sender reports "transferring" before
+it sends the first program line, so the OFF sent at that moment reaches GRBL
+ahead of the job. During a jog GRBL accepts only realtime commands, so the
+plugin sends the jog cancel (`0x85`) and finishes the OFF at Idle. A jog is
+detected from the controller status report: a very short jog that is already
+finished before the next status report cannot be intercepted, so keep the
+beam off whenever you move the machine for any other reason than focusing.
+
 Tool switching waits for the `$32` acknowledgement before applying Candle
 Machine-info `$30`/`$31` limits. If `$32` is rejected, the plugin refreshes the
 reported settings instead of leaving the UI optimistically switched. Note that
@@ -207,7 +246,7 @@ range.
 
 - `script.js` — plugin logic;
 - `widget.ui` — the panel (4 buttons: Mode, Focus, Pulse, Off);
-- `settings.ui` — the settings page (focus, pulse, explanation);
+- `settings.ui` — the settings page (focus, pulse, jog option, explanation);
 - `translation_ru.ts` / `translation_ru.qm` — Russian localization (all
   strings);
 - `config.ini` — plugin manifest.

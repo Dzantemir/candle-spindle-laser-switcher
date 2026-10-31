@@ -4,6 +4,31 @@
 // - Button 1 toggles between Spindle ($32=0) and Laser ($32=1).
 // - Buttons 2..4 (Focus, Pulse, Laser OFF) are hidden when in Spindle mode ($32=0).
 //
+// v11 (third audit fixes):
+//   - the 5-minute focus auto-OFF no longer injects M5/S0/G0 into a running
+//     job or a jog: the OFF is sent only when the machine is Idle with the
+//     sender stopped, otherwise it waits for Idle (requestLaserOff /
+//     runDeferredLaserOff). Starting a program with the focus beam on now
+//     sends a safe OFF first: Candle emits the sender-state change BEFORE its
+//     start commands and the first program line, so the OFF reaches GRBL
+//     ahead of the job.
+//   - GRBL jogs inherit the modal M3/G1 laser state (grbl laser_mode.md), so
+//     a jog with the focus beam on burns a line along its path. New setting
+//     "Turn the focus beam OFF when a jog starts" (default on): the jog is
+//     cancelled with the realtime jog-cancel byte and the OFF follows at
+//     Idle. The OFF button also works during a jog (cancel + OFF at Idle);
+//     the panel is no longer disabled as a whole outside Idle.
+//   - default Pulse S is 10 instead of 100 (100 is FULL power on the factory
+//     laser range 0..100); a stored default of 100 is migrated once.
+//   - a click before the first $$ answer no longer inverts the controller's
+//     real mode: the clicked TARGET is remembered, and when the controller is
+//     already in that mode nothing is changed.
+//   - the overwrite confirmation is keyed by the whole transition (current
+//     controller range -> target range), so a manually changed $30/$31 is
+//     never overwritten silently only because the target was confirmed once.
+//   - cosmetics: unchanged values are shown as "(unchanged)" in the
+//     confirmation text; an unused translation entry was removed.
+//
 // v10 (second audit fixes):
 //   - $30/$31 are written SEQUENTIALLY (wait for each ack) and in an order
 //     that keeps the interim EEPROM range valid ($31 first when the current
@@ -117,6 +142,27 @@ function isMachineReady()
     return (deviceState == 1) && (senderState == 4);
 }
 
+// The OFF button is a stop button: besides Idle it must also work during a
+// jog (DeviceJog = 13), where a jog cancel is the only thing GRBL accepts.
+function isLaserOffAvailable()
+{
+    if (!isLaserMode || senderState != 4) return false;
+    return (deviceState == 1) || (deviceState == 13);
+}
+
+// Setting "Turn the focus beam OFF when a jog starts" (default on). Read live
+// from the settings page like the other plugin values.
+function focusOffOnJogEnabled()
+{
+    try {
+        if (uiSettings && uiSettings.chkFocusOffOnJog) {
+            return !!uiSettings.chkFocusOffOnJog.checked;
+        }
+    } catch (e) {
+    }
+    return true;
+}
+
 // Connect a Qt signal if the host build exposes it. Accessing a missing
 // signal property yields undefined in QtScript; calling .connect on it
 // would abort init() and lose every connection after it.
@@ -147,6 +193,14 @@ var requestedToggleTimer = null;
 // One-shot user-visible notice (e.g. a refused tool change), shown in the
 // mode button tooltip until the next mode action succeeds.
 var userNotice = null;
+
+// v11: an OFF that could not be sent right away because the machine was busy
+// (jog / run / hold ...). It is executed as soon as the machine is Idle with
+// the sender stopped. { feed: number|null }
+var laserOffAfterIdle = null;
+// v11: the mode the user clicked towards while the controller state was still
+// unknown; resolved when the $$ answer arrives.
+var requestedModeToggleTarget = null;
 
 // Exact command strings of the laser batch currently in flight. Response
 // index -100 is shared by ALL plugins/scripts (one ScriptDevice in
@@ -419,6 +473,64 @@ function sendLaserOff(restoreFeed)
     }
 }
 
+// Forget the focus beam state WITHOUT sending anything (the caller switches
+// the output off, or the beam can no longer be managed from this panel).
+// Returns the feed that has to be restored when the output is switched off.
+function clearFocusState()
+{
+    var rf = focusRestoreFeed;
+    focusActive = false;
+    focusConfirmPending = false;
+    expectedFocusCmds = null;
+    focusRestoreFeed = null;
+    stopFocusAutoOffTimer();
+    return rf;
+}
+
+// Output OFF that is safe in every machine state. Idle with the sender
+// stopped: sent right now. Otherwise the plugin never injects g-code lines
+// into a running job (or a jog, where GRBL rejects them anyway): the OFF is
+// remembered and sent by runDeferredLaserOff() as soon as the machine is Idle.
+// cancelJog additionally sends the realtime jog cancel (0x85) when a jog is
+// running - used by the OFF button and by the "jog started" interlock.
+function requestLaserOff(restoreFeed, cancelJog)
+{
+    var feed = null;
+    if (restoreFeed !== null && restoreFeed !== undefined && !isNaN(restoreFeed)) {
+        feed = Number(restoreFeed);
+    }
+    if (isMachineReady()) {
+        laserOffAfterIdle = null;
+        try { sendLaserOff(feed); } catch (e) {}
+        return true;
+    }
+    if (!laserOffAfterIdle) {
+        laserOffAfterIdle = { feed: feed };
+    } else if (feed !== null) {
+        laserOffAfterIdle.feed = feed;
+    }
+    if (cancelJog && deviceState == 13) {
+        try { app.device.sendRuntimeCommand("\x85"); } catch (e) {}
+    }
+    return false;
+}
+
+// Called after every device/sender state change.
+function runDeferredLaserOff()
+{
+    if (!laserOffAfterIdle) return;
+    // Alarm / Sleep / disconnect: GRBL has already stopped the output; a tool
+    // change sends its own M5/S0/G0.
+    if (deviceState == -1 || deviceState == 2 || deviceState == 14 || pendingToolChange) {
+        laserOffAfterIdle = null;
+        return;
+    }
+    if (!isMachineReady()) return;
+    var feed = laserOffAfterIdle.feed;
+    laserOffAfterIdle = null;
+    try { sendLaserOff(feed); } catch (e) {}
+}
+
 function stopModeChangeTimer()
 {
     if (modeChangeTimer) {
@@ -472,6 +584,7 @@ function stopRequestedToggleTimer()
 function cancelRequestedModeToggle()
 {
     requestedModeToggleAfterRefresh = false;
+    requestedModeToggleTarget = null;
     stopRequestedToggleTimer();
 }
 
@@ -485,6 +598,7 @@ function armRequestedToggleTimer()
             // The refresh never completed in time - forget the click
             // instead of firing it at some unrelated later moment.
             requestedModeToggleAfterRefresh = false;
+            requestedModeToggleTarget = null;
             updateUiState();
         });
     }
@@ -518,7 +632,7 @@ function armLaserActionTimer(extraMs)
                 stopFocusAutoOffTimer();
                 var rf = focusRestoreFeed;
                 focusRestoreFeed = null;
-                try { sendLaserOff(rf); } catch (e) {}
+                requestLaserOff(rf, false);
             }
             updateUiState();
         });
@@ -553,9 +667,21 @@ function armConfirmTimer()
     confirmTimer.start(15000);
 }
 
-function rangeKeyFor(laser, minValue, maxValue)
+// v11: the confirmation is keyed by the whole TRANSITION - target range plus
+// the controller range it replaces - so a manually changed $30/$31 asks again.
+function rangeKeyFor(laser, minValue, maxValue, fromMin, fromMax)
 {
-    return (laser ? "L:" : "S:") + String(minValue) + "-" + String(maxValue);
+    return (laser ? "L:" : "S:") + String(minValue) + "-" + String(maxValue)
+        + "<" + String(fromMin) + "-" + String(fromMax);
+}
+
+// "10000 -> 100" or "0 (unchanged)" for the confirmation text.
+function limitChangeText(fromValue, toValue)
+{
+    if (Number(fromValue) === Number(toValue)) {
+        return trFill(qsTr("%1 (unchanged)"), { "%1": fromValue });
+    }
+    return String(fromValue) + " -> " + String(toValue);
 }
 
 function persistAcknowledgedRanges()
@@ -566,6 +692,8 @@ function persistAcknowledgedRanges()
         for (var k in acknowledgedRanges) {
             if (acknowledgedRanges[k]) keys.push(k);
         }
+        // keep the list bounded: only the most recent transitions matter
+        if (keys.length > 50) keys = keys.slice(keys.length - 50);
         s.setValue("ackRanges", keys.join(","));
         if (!app.storage) s.sync();
     } catch (e) {
@@ -589,12 +717,10 @@ function armFocusAutoOffTimer()
         focusAutoOffTimer.singleShot = true;
         focusAutoOffTimer.timeout.connect(function () {
             if (!focusActive) return;
-            focusActive = false;
-            focusConfirmPending = false;
-            expectedFocusCmds = null;
-            var rf = focusRestoreFeed;
-            focusRestoreFeed = null;
-            try { sendLaserOff(rf); } catch (e) {}
+            var rf = clearFocusState();
+            // v11: never inject M5/S0/G0 into a running job or a jog - when
+            // the machine is busy the OFF waits for Idle.
+            requestLaserOff(rf, false);
             showUserNotice(qsTr("Laser focus beam was turned OFF automatically after 5 minutes."));
         });
     }
@@ -686,7 +812,7 @@ function setLaserButtonsVisible(vis)
     if (uiPanel.actLaserPulse) uiPanel.actLaserPulse.enabled = vis && ready && safePowerKnown;
     // OFF is a stop button: it stays available while other actions are
     // pending so the user can always cancel/stop the output.
-    if (uiPanel.actLaserOff) uiPanel.actLaserOff.enabled = vis && readyBasic;
+    if (uiPanel.actLaserOff) uiPanel.actLaserOff.enabled = vis && isLaserOffAvailable();
 }
 
 function updateUiState()
@@ -695,7 +821,7 @@ function updateUiState()
 
     var lim = getToolLimits();
     var fPwr = uiSettings ? uiSettings.spnFocusPower.value : 10;
-    var pPwr = uiSettings ? uiSettings.spnPulsePower.value : 100;
+    var pPwr = uiSettings ? uiSettings.spnPulsePower.value : 10;
     var pMs  = uiSettings ? uiSettings.spnPulseMs.value : 200;
 
     // 1. Update single toggle button icon, checked state, and tooltip
@@ -746,8 +872,9 @@ function updateUiState()
         (!curSMinKnown || curSMin <= curSMax);
     uiPanel.cmdFocus.enabled = machineReady && isLaserMode && safePowerKnown && !pendingToolChange && !pendingLaserAction;
     uiPanel.cmdPulse.enabled = machineReady && isLaserMode && safePowerKnown && !pendingToolChange && !pendingLaserAction;
-    // OFF is a stop button: never lock it behind a pending action.
-    uiPanel.cmdLaserOff.enabled = machineReady && isLaserMode;
+    // OFF is a stop button: never lock it behind a pending action, and keep it
+    // usable during a jog (jog cancel + OFF at Idle).
+    uiPanel.cmdLaserOff.enabled = isLaserOffAvailable();
 
     // 3. Update laser buttons state & tooltips
     uiPanel.cmdFocus.blockSignals(true);
@@ -888,6 +1015,7 @@ function applyToolChange(targetLaserMode)
         // so it can never fire at an unrelated later moment. The target
         // validation below runs when the toggle resumes from the $$ answer.
         requestedModeToggleAfterRefresh = true;
+        requestedModeToggleTarget = targetLaserMode; // v11: remember WHERE the user wants to go
         armRequestedToggleTimer();
         try { app.device.sendCommands("$$"); } catch (e) {
             cancelRequestedModeToggle();
@@ -920,7 +1048,7 @@ function applyToolChange(targetLaserMode)
     // changes stay one-click afterwards.
     var rangeDiffers = !(Number(curSMin) === Number(t.min)
             && Number(curSMax) === Number(t.max));
-    var rKey = rangeKeyFor(targetLaserMode, t.min, t.max);
+    var rKey = rangeKeyFor(targetLaserMode, t.min, t.max, curSMin, curSMax);
     if (rangeDiffers && !acknowledgedRanges[rKey]) {
         if (confirmStamp && confirmStamp.key === rKey) {
             acknowledgedRanges[rKey] = true;
@@ -931,8 +1059,8 @@ function applyToolChange(targetLaserMode)
             confirmStamp = { key: rKey };
             armConfirmTimer();
             showUserNotice(trFill(
-                qsTr("Tool change will write $30: %1 -> %2, $31: %3 -> %4. Click the mode button again within 15 seconds to confirm."),
-                { "%1": curSMax, "%2": t.max, "%3": curSMin, "%4": t.min }));
+                qsTr("Tool change will write $30: %1, $31: %2. Click the mode button again within 15 seconds to confirm."),
+                { "%1": limitChangeText(curSMax, t.max), "%2": limitChangeText(curSMin, t.min) }));
             return;
         }
     }
@@ -942,6 +1070,12 @@ function applyToolChange(targetLaserMode)
     stopConfirmTimer();
     orphanedToolChange = null;
     var restoreFeedForModeSwitch = focusRestoreFeed;
+    // an OFF that was still waiting for Idle is superseded by this change's
+    // own M5/S0/G0, but its feed restore must not be lost
+    if (restoreFeedForModeSwitch === null && laserOffAfterIdle && laserOffAfterIdle.feed !== null) {
+        restoreFeedForModeSwitch = laserOffAfterIdle.feed;
+    }
+    laserOffAfterIdle = null;
     focusActive = false;
     focusConfirmPending = false;
     expectedFocusCmds = null;
@@ -1037,7 +1171,7 @@ function onPulseClicked()
 {
     if (!isLaserMode || !isMachineReady() || pendingToolChange || pendingLaserAction) return;
 
-    var requested = uiSettings ? uiSettings.spnPulsePower.value : 100;
+    var requested = uiSettings ? uiSettings.spnPulsePower.value : 10;
     var pPwr = laserPowerForTest(requested);
     if (pPwr === null) {
         updateUiState();
@@ -1062,25 +1196,23 @@ function onLaserOffClicked()
 {
     // Stop button: also cancels any pending laser action, so a $G
     // answer arriving afterwards can no longer fire the laser.
+    // v11: works in Idle and during a jog. In a jog GRBL accepts only the
+    // realtime jog cancel, so the OFF is finished at Idle; in any other busy
+    // state the click is ignored (the lines would end up inside a job).
+    if (!isLaserOffAvailable()) { updateUiState(); return; }
     pendingLaserAction = null;
-    expectedFocusCmds = null;
     expectedPulseFinalCmd = null;
-    focusActive = false;
-    focusConfirmPending = false;
-    stopFocusAutoOffTimer();
     stopLaserActionTimer();
-    var restoreFeed = (focusRestoreFeed === null) ? null : focusRestoreFeed;
-    focusRestoreFeed = null;
-    try { sendLaserOff(restoreFeed); } catch (e) {}
+    var restoreFeed = clearFocusState();
+    requestLaserOff(restoreFeed, true);
     updateUiState();
 }
 
 function onAppDeviceStateChanged(status)
 {
-    var ready = (status == 1) && (senderState == 4);
-    if (uiPanel) {
-        uiPanel.setEnabled(ready);
-    }
+    // v11: the panel is no longer disabled as a whole outside Idle - every
+    // control gets its own availability in updateUiState(), and the OFF
+    // button has to stay usable during a jog.
 
     if (status == 2 || status == 14) {
         // Alarm / Sleep: GRBL has forcibly stopped the output. The
@@ -1091,6 +1223,7 @@ function onAppDeviceStateChanged(status)
         expectedFocusCmds = null;
         expectedPulseFinalCmd = null;
         pendingLaserAction = null;
+        laserOffAfterIdle = null; // GRBL has already stopped the output
         stopLaserActionTimer();
         stopFocusAutoOffTimer();
     }
@@ -1109,6 +1242,7 @@ function onAppDeviceStateChanged(status)
         stopLaserActionTimer();
         stopFocusAutoOffTimer();
         cancelRequestedModeToggle();
+        laserOffAfterIdle = null;
         confirmStamp = null;
         stopConfirmTimer();
         orphanedToolChange = null;
@@ -1123,16 +1257,53 @@ function onAppDeviceStateChanged(status)
     }
 
     deviceState = status;
+
+    // v11: a jog started while the focus beam is on. GRBL jogs inherit the
+    // modal M3/G1 laser state, so the jog would burn a line along its path.
+    // Cancel the jog (realtime, the only thing GRBL accepts during a jog) and
+    // switch the beam off as soon as the machine is Idle again. The setting
+    // "Turn the focus beam OFF when a jog starts" turns this off for
+    // deliberate Z focusing.
+    if (status == 13 && (focusActive || focusConfirmPending) && focusOffOnJogEnabled()) {
+        stopLaserActionTimer();
+        var jogFeed = clearFocusState();
+        requestLaserOff(jogFeed, true);
+        showUserNotice(qsTr("Focus beam turned OFF: a jog started and was cancelled. Uncheck the option in the plugin settings to keep the beam on while jogging."));
+    }
+
+    runDeferredLaserOff();
     updateUiState();
 }
 
 function onAppSenderStateChanged(status)
 {
-    var ready = (status == 4) && (deviceState == 1);
-    if (uiPanel) {
-        uiPanel.setEnabled(ready);
+    // v11: a program is about to start (Stopped -> anything else) while the
+    // focus beam is on or a laser action is pending. Candle emits this signal
+    // BEFORE it sends its start commands and the first program line, so the
+    // safe OFF sent here reaches GRBL ahead of the job instead of being
+    // injected into it later.
+    if (senderState == 4 && status != 4
+            && (focusActive || focusConfirmPending || pendingLaserAction)) {
+        // A pending action still waiting for the $G answer has not switched
+        // anything on: it is only cancelled. The output may be on when the
+        // focus beam is active/being switched on or a test pulse is running.
+        var outputMayBeOn = focusActive || focusConfirmPending
+            || !!(pendingLaserAction && pendingLaserAction.stage == "running");
+        pendingLaserAction = null;
+        expectedPulseFinalCmd = null;
+        stopLaserActionTimer();
+        var startFeed = clearFocusState();
+        if (outputMayBeOn) {
+            if (deviceState == 1) {
+                try { sendLaserOff(startFeed); } catch (e) {}
+            } else {
+                laserOffAfterIdle = { feed: startFeed === null ? null : Number(startFeed) };
+            }
+        }
     }
+
     senderState = status;
+    runDeferredLaserOff();
     updateUiState();
 }
 
@@ -1258,7 +1429,7 @@ function onAppResponseReceived(command, index, response)
         stopLaserActionTimer();
         stopFocusAutoOffTimer();
         focusRestoreFeed = null;
-        try { sendLaserOff(failedFocusFeed); } catch (e) {}
+        requestLaserOff(failedFocusFeed, false);
         updateUiState();
     }
 
@@ -1280,7 +1451,7 @@ function onAppResponseReceived(command, index, response)
             stopFocusAutoOffTimer();
             var m3FailedFeed = focusRestoreFeed;
             focusRestoreFeed = null;
-            try { sendLaserOff(m3FailedFeed); } catch (e) {}
+            requestLaserOff(m3FailedFeed, false);
             updated = true;
         }
     }
@@ -1430,8 +1601,20 @@ function onAppResponseReceived(command, index, response)
     }
     if (requestedModeToggleAfterRefresh && curModeKnown && curSMaxKnown &&
         curSMinKnown && !pendingToolChange && !pendingLaserAction) {
+        // v11: go where the user CLICKED towards, not "the opposite of whatever
+        // the controller reports now": the panel may have shown a stale mode
+        // (restored from the last session) while the controller was already
+        // in the requested one.
+        var wantLaser = requestedModeToggleTarget;
         cancelRequestedModeToggle();
-        applyToolChange(!isLaserMode); // invert the freshly read controller mode
+        if (wantLaser === null || wantLaser === undefined) wantLaser = !isLaserMode;
+        if (wantLaser === isLaserMode) {
+            showUserNotice(wantLaser
+                ? qsTr("The controller is already in LASER mode - nothing was changed.")
+                : qsTr("The controller is already in SPINDLE mode - nothing was changed."));
+        } else {
+            applyToolChange(wantLaser);
+        }
         // Even when applyToolChange refused or asked for a confirmation
         // click, the slider must follow the freshly learned mode.
         applyToolSpeeds(false);
@@ -1468,8 +1651,9 @@ function onAppSettingsLoaded()
     // "auto $$ on connect" flag - Candle itself queries $$ after every
     // connect/reset/homing, so the plugin no longer needs its own query.
     // The removals are idempotent; the stored version tracks the plugin
-    // version that last migrated the settings (v10).
-    if (parseInt(s.value("configVersion", 1), 10) < 10) {
+    // version that last migrated the settings (v11, see below).
+    var cfgVer = parseInt(s.value("configVersion", 1), 10);
+    if (cfgVer < 10) {
         s.remove("updateS");
         s.remove("spindleMax");
         s.remove("spindleMin");
@@ -1479,6 +1663,18 @@ function onAppSettingsLoaded()
         s.setValue("configVersion", 10);
         if (!app.storage) s.sync();
     }
+    // v11: the confirmation list is now keyed by transition (old entries are
+    // dropped: one fresh confirmation per transition), and the old default
+    // pulse power of 100 (full power on the factory laser range 0..100) is
+    // replaced by the new default 10.
+    if (cfgVer < 11) {
+        s.remove("ackRanges");
+        if (parseInt(s.value("pulsePower", 0), 10) === 100) {
+            s.setValue("pulsePower", 10);
+        }
+        s.setValue("configVersion", 11);
+        if (!app.storage) s.sync();
+    }
 
     // Target ranges the user has already confirmed for overwriting the
     // controller limits (see applyToolChange).
@@ -1486,13 +1682,16 @@ function onAppSettingsLoaded()
     var ackList = String(s.value("ackRanges", "") || "").split(",");
     for (var i = 0; i < ackList.length; i++) {
         var k = String(ackList[i]).replace(/^\s+|\s+$/g, "");
-        if (k) acknowledgedRanges[k] = true;
+        if (k && k.indexOf("<") !== -1) acknowledgedRanges[k] = true; // transition keys only
     }
 
     if (uiSettings) {
         uiSettings.spnFocusPower.value = parseInt(s.value("focusPower", 10), 10) || 10;
-        uiSettings.spnPulsePower.value = parseInt(s.value("pulsePower", 100), 10) || 100;
+        uiSettings.spnPulsePower.value = parseInt(s.value("pulsePower", 10), 10) || 10;
         uiSettings.spnPulseMs.value = parseInt(s.value("pulseMs", 200), 10) || 200;
+        if (uiSettings.chkFocusOffOnJog) {
+            uiSettings.chkFocusOffOnJog.checked = toBool(s.value("focusOffOnJog", true), true);
+        }
     }
 
     isLaserMode = toBool(s.value("lastLaserMode", false), false);
@@ -1511,6 +1710,9 @@ function onAppSettingsSaved()
         s.setValue("focusPower", uiSettings.spnFocusPower.value);
         s.setValue("pulsePower", uiSettings.spnPulsePower.value);
         s.setValue("pulseMs", uiSettings.spnPulseMs.value);
+        if (uiSettings.chkFocusOffOnJog) {
+            s.setValue("focusOffOnJog", !!uiSettings.chkFocusOffOnJog.checked);
+        }
     }
     s.setValue("lastLaserMode", isLaserMode);
     if (!app.storage) s.sync();
@@ -1522,7 +1724,8 @@ function onAppSettingsAboutToShow()
     storedConfig = {
         focusPower: uiSettings.spnFocusPower.value,
         pulsePower: uiSettings.spnPulsePower.value,
-        pulseMs: uiSettings.spnPulseMs.value
+        pulseMs: uiSettings.spnPulseMs.value,
+        focusOffOnJog: focusOffOnJogEnabled()
     };
 }
 
@@ -1548,6 +1751,9 @@ function onAppSettingsRejected()
         uiSettings.spnFocusPower.value = storedConfig.focusPower;
         uiSettings.spnPulsePower.value = storedConfig.pulsePower;
         uiSettings.spnPulseMs.value = storedConfig.pulseMs;
+        if (uiSettings.chkFocusOffOnJog && storedConfig.focusOffOnJog !== undefined) {
+            uiSettings.chkFocusOffOnJog.checked = storedConfig.focusOffOnJog;
+        }
     }
     applyToolSpeeds(true);
     updateUiState();
@@ -1557,7 +1763,8 @@ function onAppSettingsDefault()
 {
     if (!uiSettings) return;
     uiSettings.spnFocusPower.value = 10;
-    uiSettings.spnPulsePower.value = 100;
+    uiSettings.spnPulsePower.value = 10;
     uiSettings.spnPulseMs.value = 200;
+    if (uiSettings.chkFocusOffOnJog) uiSettings.chkFocusOffOnJog.checked = true;
     updateLaserPowerControls();
 }

@@ -43,8 +43,24 @@
         <translation>Смена инструмента отменена: недопустимый диапазон скоростей в «Информации о станке» (мин. %1, макс. %2). На контроллер ничего не отправлено.</translation>
     </message>
     <message>
-        <source>Tool change will write $30: %1 -&gt; %2, $31: %3 -&gt; %4. Click the mode button again within 15 seconds to confirm.</source>
-        <translation>Смена инструмента запишет $30: %1 -&gt; %2, $31: %3 -&gt; %4. Нажмите кнопку режима ещё раз в течение 15 секунд для подтверждения.</translation>
+        <source>Tool change will write $30: %1, $31: %2. Click the mode button again within 15 seconds to confirm.</source>
+        <translation>Смена инструмента запишет $30: %1, $31: %2. Нажмите кнопку режима ещё раз в течение 15 секунд для подтверждения.</translation>
+    </message>
+    <message>
+        <source>%1 (unchanged)</source>
+        <translation>%1 (без изменений)</translation>
+    </message>
+    <message>
+        <source>Focus beam turned OFF: a jog started and was cancelled. Uncheck the option in the plugin settings to keep the beam on while jogging.</source>
+        <translation>Луч фокусировки выключен: началось перемещение (джог), оно отменено. Чтобы оставлять луч включённым при перемещении, снимите галочку в настройках плагина.</translation>
+    </message>
+    <message>
+        <source>The controller is already in LASER mode - nothing was changed.</source>
+        <translation>Контроллер уже в режиме ЛАЗЕР — ничего не изменено.</translation>
+    </message>
+    <message>
+        <source>The controller is already in SPINDLE mode - nothing was changed.</source>
+        <translation>Контроллер уже в режиме ШПИНДЕЛЬ — ничего не изменено.</translation>
     </message>
     <message>
         <source>Tool mode changed, but applying $30/$31 failed. Check $30/$31 in the controller before using the machine.</source>
@@ -53,10 +69,6 @@
     <message>
         <source>Laser focus beam was turned OFF automatically after 5 minutes.</source>
         <translation>Луч фокусировки автоматически выключен через 5 минут.</translation>
-    </message>
-    <message>
-        <source>Spindle / Laser</source>
-        <translation>Шпиндель / Лазер</translation>
     </message>
 </context>
 <context>
@@ -110,6 +122,14 @@
     <message>
         <source>Pulse S / Time (ms):</source>
         <translation>Импульс S / Время (мс):</translation>
+    </message>
+    <message>
+        <source>Turn focus beam OFF when a jog starts</source>
+        <translation>Выключать луч фокусировки при начале перемещения (джога)</translation>
+    </message>
+    <message>
+        <source>GRBL jogs keep the laser state, so a jog with the focus beam on burns a line. When enabled, the jog is cancelled and the beam is switched off as soon as a jog starts. Disable it only for deliberate Z focusing.</source>
+        <translation>Перемещения (джог) в GRBL сохраняют состояние лазера, поэтому джог с включённым лучом фокусировки прожигает линию. Если опция включена, джог отменяется, а луч выключается, как только джог начался. Отключайте её только для осознанной фокусировки по Z.</translation>
     </message>
     <message>
         <source>After GRBL acknowledges $32, the plugin sends $30 and $31 from Candle "Machine info". Both commands appear in the log even when a value is unchanged. The speed slider follows the active tool.</source>

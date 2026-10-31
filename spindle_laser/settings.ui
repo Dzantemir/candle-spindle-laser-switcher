@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>340</width>
-    <height>170</height>
+    <height>200</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -74,7 +74,7 @@
         <number>100000</number>
        </property>
        <property name="value">
-        <number>100</number>
+        <number>10</number>
        </property>
       </widget>
      </item>
@@ -95,6 +95,19 @@
       </widget>
      </item>
     </layout>
+   </item>
+   <item>
+    <widget class="QCheckBox" name="chkFocusOffOnJog">
+     <property name="toolTip">
+      <string>GRBL jogs keep the laser state, so a jog with the focus beam on burns a line. When enabled, the jog is cancelled and the beam is switched off as soon as a jog starts. Disable it only for deliberate Z focusing.</string>
+     </property>
+     <property name="text">
+      <string>Turn focus beam OFF when a jog starts</string>
+     </property>
+     <property name="checked">
+      <bool>true</bool>
+     </property>
+    </widget>
    </item>
   </layout>
  </widget>
